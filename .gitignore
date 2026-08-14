@@ -1,0 +1,22 @@
+node_modules/
+dist/
+.env*
+!.env.example
+*.log
+# User-added MCPs (managed via the admin panel); may contain secrets in env.
+managed.json
+
+# On-disk tool-call log (one JSONL per MCP; may contain query text).
+logs/
+
+# SSH tunnel connections and forwarding rules (managed via the panel; holds credentials).
+tunnels.json
+
+# Ledger of spawned proc-MCP child PIDs (runtime state; for orphan reaping across restarts).
+.proc-pids.json
+
+# Live gateway config (copied from gateway.config.example.json; names your own databases).
+gateway.config.json
+
+# Local `npm pack` artifacts.
+*.tgz

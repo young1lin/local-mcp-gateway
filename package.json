@@ -1,0 +1,73 @@
+{
+  "name": "local-mcp-gateway",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "lmg": "dist/bin.js",
+    "local-mcp-gateway": "dist/bin.js"
+  },
+  "description": "One local Node process that hosts every MCP server your AI clients need, on 127.0.0.1 HTTP paths.",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "mcp-server",
+    "mcp-gateway",
+    "mcp-client",
+    "claude",
+    "ai",
+    "llm",
+    "localhost"
+  ],
+  "license": "MIT",
+  "author": "young1lin <2550110827@qq.com>",
+  "homepage": "https://github.com/young1lin/local-mcp-gateway#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/young1lin/local-mcp-gateway.git"
+  },
+  "bugs": {
+    "url": "https://github.com/young1lin/local-mcp-gateway/issues"
+  },
+  "files": [
+    "dist",
+    ".agents/skills",
+    "README.md",
+    "CHANGELOG.md",
+    "SECURITY.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-assets.mjs",
+    "prepublishOnly": "npm run build",
+    "start": "node dist/bin.js start",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/client": "^2.0.0",
+    "@modelcontextprotocol/node": "^2.0.0",
+    "@modelcontextprotocol/server": "^2.0.0",
+    "dotenv": "^16.4.5",
+    "ioredis": "^6.0.0",
+    "mongodb": "^6.21.0",
+    "mysql2": "^3.23.3",
+    "pg": "^8.23.0",
+    "ssh2": "^1.17.0",
+    "undici": "^8.10.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/pg": "^8.21.0",
+    "@types/ssh2": "^1.15.5",
+    "@types/supertest": "^6.0.2",
+    "supertest": "^7.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.4"
+  }
+}

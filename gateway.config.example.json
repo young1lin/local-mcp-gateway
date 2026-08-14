@@ -1,0 +1,66 @@
+{
+  "port": 19999,
+  "host": "127.0.0.1",
+  "tokenEnv": "MCP_GATEWAY_TOKEN",
+  "servers": {
+    "echo": {
+      "type": "echo",
+      "description": "A no-op MCP so the panel has a working endpoint before any database is configured."
+    },
+    "mysql": {
+      "type": "mysql",
+      "description": "Example MySQL — your application's main database.",
+      "host": "127.0.0.1",
+      "port": 3306,
+      "user": "root",
+      "password": "${MYSQL_PASS}",
+      "database": "app",
+      "timezone": "Z"
+    },
+    "redis": {
+      "type": "redis",
+      "description": "Example Redis — cache and session keys.",
+      "host": "127.0.0.1",
+      "port": 6379,
+      "password": "${REDIS_PASS}",
+      "db": 0
+    },
+    "pg": {
+      "type": "pg",
+      "description": "Example Postgres — your application's relational database.",
+      "url": "${PG_URL}"
+    },
+    "mongo": {
+      "type": "mongo",
+      "description": "Example MongoDB — your application's document database.",
+      "url": "${MONGO_URL}"
+    },
+    "context7": {
+      "type": "http",
+      "description": "Context7 — up-to-date docs for any library, as a remote MCP.",
+      "url": "https://mcp.context7.com/mcp",
+      "headers": { "Authorization": "Bearer ${CONTEXT7_API_KEY}" }
+    },
+    "github": {
+      "type": "rest",
+      "description": "GitHub REST API — fetch a public repository's metadata as a tool, declared in config with no adapter code. Works for public repos without a token; set GITHUB_TOKEN to raise the rate limit.",
+      "baseUrl": "https://api.github.com",
+      "headers": { "Accept": "application/vnd.github+json" },
+      "tools": [
+        {
+          "name": "get_repo",
+          "description": "Get a public GitHub repository: description, stars, primary language, license and links.",
+          "input": {
+            "owner": { "type": "string", "required": true, "description": "Repository owner (user or organization)." },
+            "repo": { "type": "string", "required": true, "description": "Repository name." }
+          },
+          "request": {
+            "method": "GET",
+            "path": "/repos/{{owner}}/{{repo}}"
+          },
+          "pick": ["full_name", "description", "stargazers_count", "language", "license", "html_url"]
+        }
+      ]
+    }
+  }
+}

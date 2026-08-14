@@ -1,0 +1,61 @@
+name: Publish
+
+# Release on a `v*` tag via npm Trusted Publishing (GitHub OIDC). No long-lived NPM_TOKEN.
+# First publication is manual (npm login && npm publish); after the Trusted Publisher is configured
+# on npmjs.com, every later tag publishes itself. See RELEASING in the README.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  id-token: write # required for npm Trusted Publishing (OIDC)
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+          # No dependency cache on the release path — trading a few seconds for a clean run.
+          package-manager-cache: false
+      - name: Versions
+        run: |
+          node --version
+          npm --version
+      - name: Ensure npm supports Trusted Publishing (>= 11.5.1)
+        # Node 24 bundles a new enough npm on current runners; this guard makes that a fact rather
+        # than an assumption, and upgrades only when the bundled one is actually too old.
+        run: |
+          v=$(npm --version)
+          if [ "$(printf '%s\n' '11.5.1' "$v" | sort -V | head -1)" != "11.5.1" ]; then
+            echo "npm $v is older than 11.5.1 — upgrading"
+            npm install -g npm@latest
+            npm --version
+          else
+            echo "npm $v is fine"
+          fi
+      - run: npm ci
+      - name: Build (tsc fails on type errors, so this is the type gate)
+        run: npm run build
+      - name: Test
+        run: npm test
+      - name: Verify the tag matches package.json version
+        run: |
+          pkg=$(node -p "require('./package.json').version")
+          tag="${GITHUB_REF_NAME#v}"
+          echo "package.json version: $pkg"
+          echo "git tag (stripped):    $tag"
+          if [ "$pkg" != "$tag" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $pkg"
+            exit 1
+          fi
+      - name: Inspect the tarball that will be published
+        run: npm pack --dry-run
+      - name: Publish to npm (Trusted Publishing via OIDC)
+        run: npm publish
