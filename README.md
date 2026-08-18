@@ -280,7 +280,7 @@ the port.
 
 ## Setup
 
-Requires Node >= 20.
+Requires Node >= 22.19.0 — the floor declared by `undici` 8, which backs the HTTP proxy support in the `http` and `rest` adapters.
 
 ```bash
 npm install

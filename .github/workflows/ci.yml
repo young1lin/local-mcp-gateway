@@ -12,9 +12,9 @@ jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
-      # engines claims >= 20, so CI covers the floor, the LTS line, and current.
+      # engines claims >= 22.19.0 (undici 8 sets that floor), so CI covers the floor and current.
       matrix:
-        node-version: ["20", "22", "24"]
+        node-version: ["22", "24"]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6

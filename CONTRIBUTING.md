@@ -5,7 +5,7 @@ focused project — the bar is "correct and tested", not "clever".
 
 ## Setup
 
-Requires Node.js 20 or newer.
+Requires Node.js 22.19.0 or newer (the floor `undici` 8 declares).
 
 ```bash
 git clone https://github.com/young1lin/local-mcp-gateway.git

@@ -9,7 +9,7 @@ symlink to this file.
 `local-mcp-gateway` is one local Node process that hosts every MCP server an AI
 client needs, exposing each on an HTTP path under `127.0.0.1:19999`. It replaces
 per-client, per-server process spawning with one shared, loopback-only gateway.
-TypeScript (strict), MIT-licensed, Node >= 20.
+TypeScript (strict), MIT-licensed, Node >= 22.19.0 (undici 8 sets that floor).
 
 ## Load-bearing rules — do not break these
 
