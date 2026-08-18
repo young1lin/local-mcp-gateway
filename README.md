@@ -285,7 +285,7 @@ Requires Node >= 20.
 ```bash
 npm install
 cp gateway.config.example.json gateway.config.json   # then edit in your own MCPs
-cp .env.example .env                                  # then set a token + any DB credentials
+cp .env.example .env                                  # then fill in any DB credentials
 npm test                                              # unit tests (DB integration tests auto-skip without creds)
 npm run build
 npx lmg start                                         # detached daemon — same as `lmg start`
@@ -294,13 +294,16 @@ npx lmg start                                         # detached daemon — same
 `npm start` is the same command (`node dist/bin.js start`). For source hot-reload while hacking,
 `npm run dev` (`tsx watch`) — that is a foreground process, not the daemon.
 
-Generate a token with `node -e "console.log(require('crypto').randomBytes(24).toString('hex'))"` and
-put it in `.env` as `MCP_GATEWAY_TOKEN`. You can also view, copy and rotate it from the panel's
-**Token** button — rotation persists to `managed.json` and takes effect without a restart.
+The first run generates the bearer token and the panel password itself, writes both into `.env` in
+the data dir, and prints neither into the daemon log. Read them back with `lmg creds` (url, user,
+password, token) — that is also what to ask an AI agent to run, rather than pointing it at `.env`,
+which holds your database passwords too. The token can also be viewed, copied and rotated from the
+panel's **Token** button; rotation persists to `managed.json` and takes effect without a restart.
 
-> **Change the admin password.** The management panel defaults to `admin` / `admin`. Override with
-> `GATEWAY_USER` / `GATEWAY_PASS` in `.env` before you rely on it. The panel is localhost-only, but
-> so is everything else here — set it anyway.
+> **Do not put placeholder values in `.env`.** A generated credential is only filled in when the key
+> is *absent* — a line that already reads `MCP_GATEWAY_TOKEN=` or `GATEWAY_PASS=admin` is taken at
+> face value and becomes your real credential. That is why `.env.example` ships both keys commented
+> out. `GATEWAY_USER` defaults to `admin`; set it only if you want another name.
 
 The shipped example config includes an `echo` MCP that needs no database, so the panel has a working
 endpoint immediately. The `mysql` / `redis` / `pg` / `mongo` entries are templates: they read their
