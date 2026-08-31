@@ -17,6 +17,18 @@ describe("renderResult output budget", () => {
     expect(renderResult([Buffer.from("a"), Buffer.from("b")])).toBe(JSON.stringify(["a", "b"], null, 2));
   });
 
+  it("decodes Buffers NESTED in row objects — the shape a BLOB column actually arrives in", () => {
+    // mysql2's BLOB and pg's bytea both surface as { rowCount, rows: [{ col: <Buffer> }] }; the old
+    // walk only touched top-level Buffers and array elements, so a single BLOB column dumped its
+    // bytes as a JSON number array and burned the whole budget.
+    const res = { rowCount: 2, rows: [{ id: 1, blob: Buffer.from("alpha") }, { id: 2, blob: Buffer.from("beta") }] };
+    expect(JSON.parse(renderResult(res))).toEqual({ rowCount: 2, rows: [{ id: 1, blob: "alpha" }, { id: 2, blob: "beta" }] });
+    // Class instances keep their toJSON: a Date stays a Date (serialized as its ISO string), it is
+    // not rebuilt into an empty plain object.
+    const withDate = { at: new Date(0), rows: [Buffer.from("x")] };
+    expect(JSON.parse(renderResult(withDate)).at).toBe("1970-01-01T00:00:00.000Z");
+  });
+
   it("caps item count and says how much was dropped", () => {
     const out = renderResult(Array.from({ length: 5000 }, (_, i) => i), { maxItems: 10, maxBytes: 1_000_000 });
     expect(out).toContain("showing the first 10 of 5000 items");
@@ -109,6 +121,25 @@ describe("makeToolServer resources", () => {
     const server = makeToolServer(tools, call, { name: "t" }, resources);
     return openSession(server);
   }
+
+  it("refuses a tools/call for a name the advertised list does not carry", async () => {
+    // The advertised list is the contract: a tool hidden from tools/list (a readonly mongo's write
+    // tools, or anything the operator disabled) must not be callable by naming it directly. The
+    // call fn here KNOWS the name — the handler must still refuse, which is exactly the bug.
+    const seen: string[] = [];
+    const client = await openSession(makeToolServer(
+      [{ name: "visible", description: "v", inputSchema: { type: "object" } }],
+      async (name) => { seen.push(name); return "ran"; },
+      { name: "t" },
+    ));
+    try {
+      await client.callTool({ name: "visible", arguments: {} } as never);
+      await expect(client.callTool({ name: "hidden_write", arguments: {} } as never)).rejects.toThrow(/unknown tool: hidden_write/);
+      expect(seen).toEqual(["visible"]); // the hidden name never reached the adapter
+    } finally {
+      await client.close();
+    }
+  });
 
   const provider: ResourceProvider = {
     async list(cursor?: string) {

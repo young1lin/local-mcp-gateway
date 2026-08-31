@@ -1,17 +1,23 @@
 import { randomBytes } from "node:crypto";
-import { copyFileSync, existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { dataDir, dataPath } from "./datadir.js";
-import { chmodPrivate, mkdirPrivate, writeFilePrivate } from "./privfs.js";
+import { chmodPrivate, mkdirPrivate } from "./privfs.js";
 import { skillDir } from "./skilldir.js";
+import { readSecureJson, writeSecureJson } from "./secure/statefile.js";
+import { envStorePath, parseEnvText, readEnvStore, setEnvDefault, writeEnvStore } from "./secure/envstore.js";
 import { DEFAULT_PORT, asListenPort, envListenPort } from "./port.js";
 
 /**
- * The minimal config seeded on first run: one `echo` MCP so the panel has a working endpoint
- * before any database is configured, and nothing else. The richer `gateway.config.example.json`
- * stays shipped for manual `cp` use (the README points at it); a zero-config first run wants no
+ * The minimal config seeded on first run: one 'echo' MCP so the panel has a working endpoint
+ * before any database is configured, and nothing else. The richer 'gateway.config.example.json'
+ * stays shipped for manual cp use (the README points at it); a zero-config first run wants no
  * row of "down" database templates the user never asked for. The skill carries the database
  * examples instead, where they are actually useful.
+ *
+ * Everything this file writes is SEALED on arrival (see secure/statefile.ts): the seed config,
+ * the env store holding the token, and any migrated repo-local state. A plaintext file dropped
+ * into the data dir by hand is adopted and sealed on the next read.
  */
 function seedConfig() {
   return {
@@ -36,48 +42,64 @@ interface FirstRunReport {
   dataDir: string;
   /** The token, only when this run generated it. */
   newToken?: string;
-  /** The panel password, only when this run generated it. */
-  newPass?: string;
-  /** True when a repo-local .env / config was copied into the data dir. */
+  /** True when a repo-local .env / config was folded into the sealed stores. */
   migrated: boolean;
   /** True when the data dir did not exist before this call. */
   created: boolean;
 }
 
+/** Does this text look like IT BELONGS to a gateway setup? Same gate as the config below: without
+ *  it, ANY directory's .env (a random Node project full of database passwords) would be adopted. */
+function looksLikeGatewayEnv(text: string): boolean {
+  return /^MCP_GATEWAY_TOKEN=/m.test(text);
+}
+
+/** A gateway config carries tokenEnv + servers; anything else is not ours to adopt. */
+function looksLikeGatewayConfigShape(parsed: unknown): boolean {
+  return !!parsed && typeof parsed === "object" && "tokenEnv" in parsed && "servers" in parsed;
+}
+
 /**
- * Append `key=value` to an env file iff the key is not already present (checked against both
- * `KEY=` and `export KEY=` forms). Preserves every existing line verbatim. Returns true when it
- * wrote a new value.
+ * Fold a repo-local .env into the sealed env store — PARSED, never file-copied, so no plaintext
+ * lands in the data dir even briefly. First run only: an existing env.json always wins.
  */
-function ensureEnvKey(envPath: string, key: string, value: string): boolean {
-  const text = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
-  const prefix = `${key}=`;
-  const present = text
-    .split(/\r?\n/)
-    .some((l) => l.startsWith(prefix) || l.startsWith(`export ${prefix}`));
-  if (present) return false;
-  const sep = text && !text.endsWith("\n") ? "\n" : "";
-  writeFilePrivate(envPath, text + sep + `${key}=${value}\n`);
-  return true;
+function migrateEnvOnce(): boolean {
+  const repoEnv = join(process.cwd(), ".env");
+  if (existsSync(envStorePath()) || !existsSync(repoEnv)) return false;
+  try {
+    const text = readFileSync(repoEnv, "utf8");
+    if (!looksLikeGatewayEnv(text)) return false;
+    const pairs = parseEnvText(text);
+    if (!Object.keys(pairs).length) return false;
+    writeEnvStore(pairs);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
-/** Copy a repo-local state file into the data dir, but only when the data dir does not already
- *  have one — so a first run of the new build from the repo picks up the user's existing setup,
- *  and later runs never clobber what the data dir owns. Returns true when it copied. */
-function migrateOnce(repoFile: string, dataFile: string): boolean {
-  const repoPath = join(process.cwd(), repoFile);
-  if (!existsSync(repoPath) || existsSync(dataFile)) return false;
-  copyFileSync(repoPath, dataFile);
-  return true;
+/** Adopt a repo-local gateway.config.json once — sealed on arrival, never plaintext on disk. */
+function migrateConfigOnce(): boolean {
+  const repoPath = join(process.cwd(), "gateway.config.json");
+  const dataFile = dataPath("gateway.config.json");
+  if (existsSync(dataFile) || !existsSync(repoPath)) return false;
+  try {
+    const parsed = JSON.parse(readFileSync(repoPath, "utf8"));
+    if (!looksLikeGatewayConfigShape(parsed)) return false;
+    writeSecureJson(dataFile, parsed);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
- * Make the gateway runnable with no prior setup: create the data dir, pull in any repo-local
- * state once, seed a default config, and guarantee a token and panel password exist. Safe to call
- * every boot — it only acts on what is missing.
+ * Make the gateway runnable with no prior setup: create the data dir, fold any repo-local state
+ * in once (sealed), seed a default config, and guarantee a token exists in the sealed env store.
+ * Safe to call every boot — it only acts on what is missing.
  *
- * Runs at the top of `main()`, before `loadConfig()`, because `loadConfig` reads the token from
- * the `.env` this writes.
+ * Runs at the top of main(), before loadConfig(), because loadConfig injects the env store this
+ * seeds into process.env.
  */
 export function ensureFirstRun(): FirstRunReport {
   const dir = dataDir();
@@ -86,67 +108,55 @@ export function ensureFirstRun(): FirstRunReport {
 
   // Pull an existing repo-local setup in once (the user's current .env / config), so an upgrade
   // does not throw away a working token and hand the operator a blank slate. Both are attempted —
-  // `||` would short-circuit past the config copy once the .env copy succeeded, silently replacing
-  // the user's real gateway.config.json with the echo-only seed.
-  const envPath = dataPath(".env");
-  const cfgPath = dataPath("gateway.config.json");
-  const migratedEnv = migrateOnce(".env", envPath);
-  const migratedCfg = migrateOnce("gateway.config.json", cfgPath);
+  // the old '||' short-circuited past the config copy once the .env copy succeeded, silently
+  // replacing the user's real gateway.config.json with the echo-only seed.
+  const migratedEnv = migrateEnvOnce();
+  const migratedCfg = migrateConfigOnce();
   const migrated = migratedEnv || migratedCfg;
 
-  // Seed a default config when none exists (after the migration attempt above).
-  if (!existsSync(cfgPath)) {
-    writeFilePrivate(cfgPath, JSON.stringify(seedConfig(), null, 2) + "\n");
+  // Seed a default config when none exists (after the migration attempt above) — sealed from the
+  // first byte it spends on disk.
+  if (!existsSync(dataPath("gateway.config.json"))) {
+    writeSecureJson(dataPath("gateway.config.json"), seedConfig());
   }
 
-  // Guarantee credentials exist. A generated token means clients configured against it keep
-  // working across machines only if it is durable — hence the data dir, not the npx cache.
-  const newToken = ensureEnvKey(envPath, "MCP_GATEWAY_TOKEN", randomBytes(24).toString("hex"))
-    ? readEnvValue(envPath, "MCP_GATEWAY_TOKEN")
-    : undefined;
-  // The panel defaults to admin/admin, which is insecure; generate a password when none is set,
-  // leaving GATEWAY_USER at its "admin" default.
-  const newPass = ensureEnvKey(envPath, "GATEWAY_PASS", randomBytes(12).toString("base64url"))
-    ? readEnvValue(envPath, "GATEWAY_PASS")
+  // Guarantee the token exists, in the sealed env store (the plaintext .env replacement). A
+  // generated token means clients configured against it keep working only if it is durable —
+  // hence the data dir, not the npx cache. (The panel has no login: the loopback guard is its
+  // boundary, so no password is generated.)
+  const newToken = setEnvDefault("MCP_GATEWAY_TOKEN", randomBytes(24).toString("hex"))
+    ? readEnvStore()["MCP_GATEWAY_TOKEN"]
     : undefined;
 
   chmodPrivate(dir, true);
-  for (const f of [".env", "managed.json", "tunnels.json", "gateway.config.json"]) {
+  for (const f of ["env.json", "master.key", "managed.json", "tunnels.json", "gateway.config.json"]) {
     chmodPrivate(dataPath(f));
   }
 
-  const report: FirstRunReport = { dataDir: dir, newToken, newPass, migrated, created };
+  const report: FirstRunReport = { dataDir: dir, newToken, migrated, created };
   printReport(report);
   return report;
-}
-
-/** Read a single KEY= value back out of an env file (the one this just wrote). */
-function readEnvValue(envPath: string, key: string): string | undefined {
-  if (!existsSync(envPath)) return undefined;
-  const prefix = `${key}=`;
-  for (const line of readFileSync(envPath, "utf8").split(/\r?\n/)) {
-    if (line.startsWith(prefix)) return line.slice(prefix.length).trim();
-  }
-  return undefined;
 }
 
 /** The panel URL from the config we just wrote or migrated — never a hardcoded 19999. */
 function panelUrl(): string {
   try {
-    const p = asListenPort(JSON.parse(readFileSync(dataPath("gateway.config.json"), "utf8")).port);
-    if (p !== undefined) return `http://127.0.0.1:${p}/`;
+    const p = asListenPort((readSecureJson<{ port?: unknown }>(dataPath("gateway.config.json")) ?? {}).port);
+    if (p !== undefined) return "http://127.0.0.1:" + p + "/";
   } catch {
     /* no config yet */
   }
-  return `http://127.0.0.1:${envListenPort() ?? DEFAULT_PORT}/`;
+  return "http://127.0.0.1:" + (envListenPort() ?? DEFAULT_PORT) + "/";
 }
 function printReport(r: FirstRunReport): void {
-  if (!r.created && !r.migrated && !r.newToken && !r.newPass) return; // ordinary boot: say nothing
+  if (!r.created && !r.migrated && !r.newToken) return; // ordinary boot: say nothing
   console.log("");
-  console.log(`mcp-gateway data dir: ${r.dataDir}`);
-  if (r.migrated) console.log("  (imported your existing .env / gateway.config.json from this directory)");
-  if (r.newToken || r.newPass) console.log("  login:              lmg creds");
-  console.log(`  panel:              ${panelUrl()}`);
-  console.log(`  skill:              ${SKILL_PATH}`);
+  console.log("mcp-gateway data dir: " + r.dataDir);
+  if (r.migrated) {
+    console.log("  (imported your existing .env / gateway.config.json from this directory — now encrypted at rest)");
+  }
+  if (r.newToken) console.log("  token:              lmg creds (the panel itself has no login)");
+  console.log("  panel:              " + panelUrl());
+  console.log("  skill:              " + SKILL_PATH);
   console.log("");
 }

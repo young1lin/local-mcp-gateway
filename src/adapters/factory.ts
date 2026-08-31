@@ -119,12 +119,15 @@ export class ExternalAdapter implements Adapter {
     return this.inner.makeServer ? this.inner.makeServer() : this.builtServer;
   }
 
-  /** Health-probe semantics mirror HttpAdapter: an inner adapter without `ping` means "connected,
-   *  deliberately nothing more" — build proved reachability, and a third-party endpoint should
-   *  not be polled every 15s. */
-  async ping(): Promise<void> {
-    if (!this.inner) throw new Error("not started");
-    if (this.inner.ping) await this.inner.ping();
+  /** Ping exists only when the inner adapter declares one. A custom adapter wrapping a real
+   *  database should be probed like the built-ins; one wrapping a metered remote must stay
+   *  "unknown" rather than be polled every 15s (the AGENTS.md http/rest rule). The getter keeps
+   *  presence dynamic — `registry.checkOne` reads `adapter.ping` fresh each probe — instead of the
+   *  old always-succeed method that lit http-shaped externals green with a fake latency. */
+  get ping(): (() => Promise<void>) | undefined {
+    const inner = this.inner;
+    if (!inner?.ping) return undefined;
+    return () => inner.ping!();
   }
 
   async close(): Promise<void> {
@@ -183,6 +186,7 @@ registerAdapterFactory("proc", (def, name) =>
     description: def.description as string | undefined,
     exposeResources: def.exposeResources as boolean | undefined,
     exposePrompts: def.exposePrompts as boolean | undefined,
+    timeoutMs: def.timeoutMs as number | undefined,
   }),
 );
 registerAdapterFactory("rest", (def, name) => new RestAdapter(def, name));

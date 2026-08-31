@@ -6,9 +6,18 @@
  * can't give on its own: it captures initialize / tools/list / resources/list / resources/read too,
  * not just tools/call, and it records the clientInfo a client announces during the handshake.
  *
- * In-memory and bounded: it is for live observation, so it resets on restart. The tool-call log on
- * disk keeps the durable, detailed history of actual tool results.
+ * Bounded but durable: the newest KEEP entries also append to one JSONL tail on disk and are
+ * restored on boot (initTrafficLog), so a gateway restart no longer blanks this view while the
+ * tool-call log keeps its history — an asymmetry the operator rightly read as data loss. The ring
+ * stays what reads serve; the file is a recovery tail, bounded by a byte budget like calls.ts.
  */
+import { appendFile, mkdir, open, stat } from "node:fs/promises";
+import { join } from "node:path";
+import { SECRET_ARG_KEY_RE } from "./mask.js"; // the one shared secret-wordlist (see mask.ts)
+import { dataPath } from "./datadir.js";
+import { log } from "./log.js";
+import { chmodPrivate } from "./privfs.js";
+import { tailLines, writeFileRenamed } from "./calls.js";
 export interface TrafficEntry {
   seq: number;
   at: string;
@@ -46,7 +55,7 @@ let seq = 0;
  */
 const knownClient = new Map<string, { name?: string; version?: string }>();
 
-const SECRET_RE = /(password|passwd|secret|token|credential|authorization|api[_-]?key)/i;
+const SECRET_RE = SECRET_ARG_KEY_RE;
 const PARAMS_MAX = 512;
 /** Cap on the full request body stored for the expandable raw view (keeps the ring + poll small). */
 const BODY_MAX = 8 * 1024;
@@ -185,6 +194,7 @@ export function recordTraffic(
     };
     ring.push(entry);
     if (ring.length > KEEP) ring = ring.slice(-KEEP);
+    persistTraffic(entry);
   }
 }
 
@@ -336,7 +346,7 @@ export function trafficClients(): Array<{
 
 /**
  * The client identity the panel groups rows by — exported so the clear-by-client filter uses the
- * exact same key. Keep in lock-step with `clientKey` in admin.html.
+ * exact same key. Keep in lock-step with `clientKey` in src/admin/js/traffic.js.
  */
 export function clientKeyOf(e: { clientName?: string; client?: string }): string {
   if (e.clientName) return "n:" + e.clientName;
@@ -350,11 +360,161 @@ export function clientKeyOf(e: { clientName?: string; client?: string }): string
 export function clearTraffic(clientKey?: string): void {
   if (clientKey) {
     ring = ring.filter((e) => clientKeyOf(e) !== clientKey);
-    return;
+    if (bootPending) bootPending = bootPending.filter((e) => clientKeyOf(e) !== clientKey);
+    if (trafficFile && bootPending !== null) pendingClearClient = clientKey; // the tail being restored too
+  } else {
+    ring = [];
+    seq = 0;
+    if (bootPending !== null) bootPending = [];
+    if (trafficFile && bootPending !== null) pendingClearAll = true;
   }
-  ring = [];
-  seq = 0;
+  if (trafficFile) {
+    // The file follows the ring: rewritten from whatever survives, once the boot load (which applies
+    // pendingClear* to the tail it restores) has settled.
+    trafficQueue = trafficQueue
+      .then(() => trafficLoad)
+      .then(async () => {
+        const lines = ring.map((e) => JSON.stringify(e) + "\n").join("");
+        trafficBytes = Buffer.byteLength(lines);
+        await writeFileRenamed(trafficFile!, lines);
+      })
+      .catch((err) => onTrafficWriteError("clear", err));
+  }
   // Intentionally NOT clearing knownClient: "Clear" wipes the log, not the gateway's memory of which
   // token is which client. Forgetting it here would make ongoing traffic drop back to "token X" until
   // the client happens to re-initialize — the split looking like it came back.
+}
+
+// --- durability: the ring survives a restart ---------------------------------------------------
+
+/** File budget: trim the tail once it passes 2 MB, keeping the newest ~1 MB — the same shape and the
+ *  same numbers as the call log's index (calls.ts), for a log whose entries can reach ~16 KB. */
+const TRAFFIC_MAX_BYTES = 2 * 1024 * 1024;
+const TRAFFIC_KEEP_BYTES = 1024 * 1024;
+
+/** Unset until initTrafficLog arms it: without a file the module behaves exactly as it did before
+ *  persistence existed (in-memory ring only — what unit tests and standalone tool imports get). */
+let trafficDir: string | undefined;
+let trafficFile: string | undefined;
+let trafficBytes = 0;
+let trafficLoad: Promise<void> = Promise.resolve();
+let trafficQueue: Promise<void> = Promise.resolve();
+/** Entries recorded while the boot load is still reading: renumbered on top of the restored seq so
+ *  the freshest frames never collide with the tail from disk, then appended after it. Null once the
+ *  load has settled (or when persistence was never armed). */
+let bootPending: TrafficEntry[] | null = null;
+/** A clear that raced the boot load — applied to the restored tail in the merge below, so disk
+ *  cannot resurrect rows the operator deleted a moment earlier. */
+let pendingClearAll = false;
+let pendingClearClient: string | undefined;
+
+let lastWriteError = 0;
+function onTrafficWriteError(where: string, err: unknown): void {
+  // A log that cannot be written must never break a request, but silence would be worse.
+  const now = Date.now();
+  if (now - lastWriteError < 30000) return;
+  lastWriteError = now;
+  log("warn", "traffic log write failed", { where, err: err instanceof Error ? err.message : String(err) });
+}
+
+/** One disk line back to an entry, skipping torn lines (killed mid-append) rather than failing boot. */
+function parseTrafficEntry(line: string): TrafficEntry | undefined {
+  try {
+    const e = JSON.parse(line) as TrafficEntry;
+    if (typeof e.seq !== "number" || typeof e.mcp !== "string" ||
+      typeof e.method !== "string" || typeof e.body !== "string") return undefined;
+    return e;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Turn durability on and restore the newest KEEP entries from disk.
+ *
+ * Called once by the gateway's entry point (src/index.ts) before it starts listening, so the first
+ * panel poll already sees the pre-restart history. Entries already recorded (and recorded while the
+ * load is in flight) are folded in by the merge below. Idempotent: a second call is a no-op.
+ */
+export function initTrafficLog(dir?: string): Promise<void> {
+  if (trafficFile) return trafficLoad;
+  trafficDir = dir ?? dataPath("logs");
+  trafficFile = join(trafficDir, "traffic.jsonl");
+  bootPending = ring; // anything already recorded this boot sits on top of the restored tail
+  trafficLoad = (async () => {
+    let restored: TrafficEntry[] = [];
+    try {
+      const tail = await tailLines(trafficFile!, KEEP);
+      restored = tail.lines.map(parseTrafficEntry).filter((e): e is TrafficEntry => e !== undefined).reverse();
+      trafficBytes = (await stat(trafficFile!)).size;
+    } catch {
+      trafficBytes = 0; // no file yet — first boot
+    }
+    // A clear that landed while the load was reading applies to the restored rows too (and only to
+    // them: the pending list was filtered the moment clearTraffic ran).
+    if (pendingClearAll) restored = [];
+    else if (pendingClearClient) restored = restored.filter((e) => clientKeyOf(e) !== pendingClearClient);
+    const pending = bootPending ?? [];
+    bootPending = null;
+    let max = restored.reduce((m, e) => Math.max(m, e.seq), 0);
+    for (const e of pending) e.seq = ++max; // renumber above the restored tail — never a collision
+    seq = max;
+    ring = [...restored, ...pending].slice(-KEEP);
+    pendingClearAll = false;
+    pendingClearClient = undefined;
+    // The token→client memory rides along: without it, restored traffic would show "token X" rows
+    // until that client happens to send another initialize.
+    for (const e of ring) {
+      if (e.client && e.clientName) knownClient.set(e.client, { name: e.clientName, version: e.clientVersion });
+    }
+  })();
+  trafficLoad.catch((err) => onTrafficWriteError("load", err));
+  return trafficLoad;
+}
+
+/** Append one entry, once the boot load has settled. Serialized so lines cannot interleave; never
+ *  awaited by the caller — recording traffic must not sit on the hot path of a request. */
+function persistTraffic(entry: TrafficEntry): void {
+  if (bootPending !== null) bootPending.push(entry);
+  if (!trafficFile) return;
+  trafficQueue = trafficQueue
+    .then(() => trafficLoad)
+    .then(async () => {
+      await mkdir(trafficDir!, { recursive: true });
+      chmodPrivate(trafficDir!, true);
+      const line = JSON.stringify(entry) + "\n";
+      await appendFile(trafficFile!, line, "utf8");
+      chmodPrivate(trafficFile!);
+      trafficBytes += Buffer.byteLength(line);
+      if (trafficBytes > TRAFFIC_MAX_BYTES) await trimTrafficLog();
+    })
+    .catch((err) => onTrafficWriteError("append", err));
+}
+
+/** Drop the oldest lines once the tail outgrows its budget — the call log's trim, with one fix:
+ *  the read handle is closed BEFORE the tmp→rename swap, because Windows refuses to replace a file
+ *  that is still open (every trim failed EPERM until the close moved ahead of the rename). */
+async function trimTrafficLog(): Promise<void> {
+  let kept: Buffer;
+  const handle = await open(trafficFile!, "r");
+  try {
+    const info = await handle.stat();
+    const start = Math.max(0, info.size - TRAFFIC_KEEP_BYTES);
+    const buf = Buffer.alloc(info.size - start);
+    await handle.read(buf, 0, buf.length, start);
+    // Start at the first line boundary, so the file never begins with half an entry.
+    const nl = buf.indexOf(0x0a);
+    kept = nl >= 0 ? buf.subarray(nl + 1) : Buffer.alloc(0);
+  } finally {
+    await handle.close();
+  }
+  await writeFileRenamed(trafficFile!, kept!);
+  trafficBytes = kept!.length;
+  log("info", "traffic log trimmed", { keptBytes: kept!.length });
+}
+
+/** Wait for the boot load and every pending write (the shutdown path and tests). */
+export async function flushTraffic(): Promise<void> {
+  await trafficLoad;
+  await trafficQueue;
 }

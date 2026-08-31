@@ -45,7 +45,7 @@ off: reaching the gateway from another machine is what SSH port forwarding is fo
 | Adapter | Tools |
 | --- | --- |
 | mysql | `mysql_query` |
-| redis | `redis_scan`, `redis_get`, `redis_hgetall`, `redis_command` |
+| redis | `redis_scan`, `redis_read`, `redis_command` |
 | pg | `pg_query`, `pg_list_tables`, `pg_describe_table` |
 | mongo | `mongo_find`, `mongo_aggregate`, `mongo_list_collections`, `mongo_describe_collection` — plus `mongo_insert_many`, `mongo_update_many`, `mongo_delete_many` when the MCP is not read-only |
 | proc / http / echo | whatever the child or remote exposes |
@@ -54,6 +54,14 @@ Deliberately small: a tool's schema is re-sent on every request, and one gateway
 each tool set is the few things a model actually needs. A SQL `SELECT` with no `LIMIT` is capped
 (200 rows by default) and says so in the reply; every result is bounded (1000 items / 256 KB) so one
 query cannot flood a client's context.
+
+`redis_read` is type-aware: one call answers "what is this key and what is in it?" — no `GET` on a
+hash dead-ending with WRONGTYPE, no guessing which command fits. It returns
+`{ key, type, ttl, length, truncated?, value }` with the value already shaped to the type (hash →
+object, list → array, set → sorted array, zset → `{ member: score }` in rank order, stream →
+`[{ id, fields }]`), and `offset`/`limit` page the ordered types. The same shapes over the raw
+channel would be flat arrays, which is why `redis_command`'s description says so and points reads
+back at `redis_read`.
 
 ### What `redis_command` refuses
 
@@ -294,16 +302,19 @@ npx lmg start                                         # detached daemon — same
 `npm start` is the same command (`node dist/bin.js start`). For source hot-reload while hacking,
 `npm run dev` (`tsx watch`) — that is a foreground process, not the daemon.
 
-The first run generates the bearer token and the panel password itself, writes both into `.env` in
-the data dir, and prints neither into the daemon log. Read them back with `lmg creds` (url, user,
-password, token) — that is also what to ask an AI agent to run, rather than pointing it at `.env`,
-which holds your database passwords too. The token can also be viewed, copied and rotated from the
-panel's **Token** button; rotation persists to `managed.json` and takes effect without a restart.
+The first run generates the bearer token, writes it into `.env` in the data dir, and never prints
+it into the daemon log. Read it back with `lmg creds` (url + token) — that is also what to ask an AI
+agent to run, rather than pointing it at `.env`, which holds your database passwords too. The token
+can also be viewed, copied and rotated from the panel's **Token** button; rotation persists to
+`managed.json` and takes effect without a restart.
+
+The panel itself has **no login**: the gateway answers loopback requests only, so reaching it at all
+already means you are on the machine it serves. The bearer token remains the gate for MCP endpoints —
+it is what AI clients authenticate with.
 
 > **Do not put placeholder values in `.env`.** A generated credential is only filled in when the key
-> is *absent* — a line that already reads `MCP_GATEWAY_TOKEN=` or `GATEWAY_PASS=admin` is taken at
-> face value and becomes your real credential. That is why `.env.example` ships both keys commented
-> out. `GATEWAY_USER` defaults to `admin`; set it only if you want another name.
+> is *absent* — a line that already reads `MCP_GATEWAY_TOKEN=` is taken at face value and becomes
+> your real credential. That is why `.env.example` ships the key commented out.
 
 The shipped example config includes an `echo` MCP that needs no database, so the panel has a working
 endpoint immediately. The `mysql` / `redis` / `pg` / `mongo` entries are templates: they read their
@@ -388,7 +399,7 @@ lmg logs -f        # follow what the background process is printing
 lmg stop           # ask it to shut down; force it only if it will not
 lmg restart
 lmg token          # the bearer token clients authenticate with
-lmg creds          # panel url, user, password, and token — for telling an AI
+lmg creds          # panel url and the client token — for telling an AI
 lmg open           # open the panel in a browser
 lmg skill install  # copy the shipped AI skill where AI tools discover it
 ```

@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { log } from "./log.js";
+import { listDaemonPorts, pidAlive, readPidFile } from "./pidfile.js";
 
 /**
  * Force-kill a process AND its whole descendant tree.
@@ -96,6 +97,23 @@ $all | Where-Object { $_.Name -eq 'node.exe' -and $_.CommandLine -and $_.Command
       resolve(pids);
     });
   });
+}
+
+/**
+ * Whether another gateway instance is alive right now (any port, any data-dir pidfile).
+ *
+ * The orphan sweeps — both this file's command-line sweep and the proc-pid ledger — exist to clean
+ * up after a PREVIOUS, dead instance. With a second instance running, "not my descendant" no longer
+ * means "orphaned": the neighbour's children look exactly the same. So the sweeps stand down while
+ * a sibling lives (see index.ts), and the port-scoped ledger keeps the instances out of each
+ * other's way in the first place.
+ */
+export function otherGatewayAlive(ownPid: number): boolean {
+  for (const port of listDaemonPorts()) {
+    const rec = readPidFile(port);
+    if (rec && rec.pid !== ownPid && pidAlive(rec.pid)) return true;
+  }
+  return false;
 }
 
 /**

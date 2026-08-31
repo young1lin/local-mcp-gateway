@@ -73,7 +73,7 @@ beforeEach(async () => {
     mcps: registryView(registry),
     makeConnection: (def, hooks) => new FakeConn(def, hooks),
   });
-  app = buildApp(registry, singleTokenManager(TOKEN), managed, { user: "admin", pass: "admin" }, "MCP_GATEWAY_TOKEN", {
+  app = buildApp(registry, singleTokenManager(TOKEN), managed, "MCP_GATEWAY_TOKEN", {
     store, manager,
   });
   echo = createServer((s) => {
@@ -109,17 +109,17 @@ async function addRule(connectionId: string, extra: Record<string, unknown> = {}
 }
 
 describe("auth", () => {
-  it("rejects every tunnel route without credentials", async () => {
+  // The tunnel routes ride the same non-gate as the rest of /api: the loopback guard ahead of every
+  // route is the boundary. A stale Authorization header (a browser that still had one, an old client)
+  // is simply ignored, not rejected.
+  it("serves every tunnel route without credentials, ignoring whatever header is sent", async () => {
     for (const [method, path] of [
       ["get", "/api/tunnels"], ["get", "/api/tunnels/keys"], ["post", "/api/tunnels/connections"],
       ["post", "/api/tunnels/start-all"], ["post", "/api/tunnels/stop-all"], ["get", "/api/tunnels/port/1234"],
     ] as const) {
       const r = await (request(app) as never as Record<string, (p: string) => request.Test>)[method](path);
-      expect(r.status).toBe(401);
+      expect(r.status).not.toBe(401);
     }
-  });
-
-  it("accepts panel credentials as well as the bearer token", async () => {
     const basic = "Basic " + Buffer.from("admin:admin").toString("base64");
     expect((await request(app).get("/api/tunnels").set({ Authorization: basic })).status).toBe(200);
   });
@@ -164,12 +164,14 @@ describe("connections", () => {
     expect((await request(app).delete("/api/tunnels/connections/nope").set(AUTH)).status).toBe(404);
   });
 
-  it("409s a delete while rules reference it, naming them", async () => {
+  it("409s a delete while rules reference it, with structured dependents like rule deletion", async () => {
     const c = await addConn();
     await addRule(String(c.id));
     const r = await request(app).delete(`/api/tunnels/connections/${c.id}`).set(AUTH);
     expect(r.status).toBe(409);
-    expect(r.body.error).toMatch(/still used by: pg/);
+    expect(r.body.dependents).toEqual(["pg"]);
+    expect(r.body.confirmRequired).toBe(true);
+    expect(r.body.error).toMatch(/in use by: pg/);
   });
 });
 
@@ -391,9 +393,71 @@ describe("ports and keys", () => {
   });
 });
 
+describe("groups and order", () => {
+  it("lists the stored group names beside the rows", async () => {
+    const c = await addConn();
+    await request(app).put("/api/tunnels/groups/connections").set(AUTH).send({ groups: ["bastion"] }).expect(200);
+    const list = await request(app).get("/api/tunnels").set(AUTH);
+    expect(list.body.connGroups).toEqual(["bastion"]);
+    expect(list.body.ruleGroups).toEqual([]);
+    void c;
+  });
+
+  it("assigns a row to a group and back to default", async () => {
+    const c = await addConn();
+    await request(app).put("/api/tunnels/groups/connections").set(AUTH).send({ groups: ["bastion"] }).expect(200);
+    const r = await request(app).put(`/api/tunnels/groups/connections/${c.id}`).set(AUTH).send({ group: "bastion" });
+    expect(r.status).toBe(200);
+    expect(r.body.group).toBe("bastion");
+    expect(store.connection(String(c.id))!.group).toBe("bastion");
+    await request(app).put(`/api/tunnels/groups/connections/${c.id}`).set(AUTH).send({ group: null }).expect(200);
+    expect(store.connection(String(c.id))!.group).toBeUndefined();
+    // an unknown group or row is a 404 ("unknown …"), not a silent success
+    expect((await request(app).put(`/api/tunnels/groups/connections/${c.id}`).set(AUTH).send({ group: "nope" })).status).toBe(404);
+    expect((await request(app).put("/api/tunnels/groups/connections/none").set(AUTH).send({ group: "bastion" })).status).toBe(404);
+  });
+
+  it("renames a group, moving its members", async () => {
+    const c = await addConn();
+    await request(app).put("/api/tunnels/groups/connections").set(AUTH).send({ groups: ["bastion"] }).expect(200);
+    await request(app).put(`/api/tunnels/groups/connections/${c.id}`).set(AUTH).send({ group: "bastion" }).expect(200);
+    const r = await request(app).post("/api/tunnels/groups/connections/rename").set(AUTH)
+      .send({ from: "bastion", to: "jumphost" });
+    expect(r.status).toBe(200);
+    expect(r.body).toEqual({ groups: ["jumphost"], moved: 1 });
+    expect(store.connection(String(c.id))!.group).toBe("jumphost");
+  });
+
+  it("deleting a group returns its members to the default", async () => {
+    const c = await addConn();
+    await request(app).put("/api/tunnels/groups/connections").set(AUTH).send({ groups: ["bastion"] }).expect(200);
+    await request(app).put(`/api/tunnels/groups/connections/${c.id}`).set(AUTH).send({ group: "bastion" }).expect(200);
+    await request(app).put("/api/tunnels/groups/connections").set(AUTH).send({ groups: [] }).expect(200);
+    expect(store.connection(String(c.id))!.group).toBeUndefined();
+  });
+
+  it("reorders both lists by id in one call; unmentioned rows keep their order", async () => {
+    const a = await addConn();
+    const b = await addConn({ ...conn, name: "second", host: "10.0.0.2" });
+    const r1 = await addRule(String(a.id), { name: "one", localPort: await freePort() });
+    const r2 = await addRule(String(b.id), { name: "two", localPort: await freePort() });
+    const r = await request(app).put("/api/tunnels/order").set(AUTH)
+      .send({ rules: [r2.id], connections: [b.id] });
+    expect(r.status).toBe(200);
+    expect(store.rules().map((x) => x.name)).toEqual(["two", "one"]);
+    expect(store.connections().map((x) => x.name)).toEqual(["second", "srv"]);
+    expect((await request(app).put("/api/tunnels/order").set(AUTH).send({ rules: "nope" })).status).toBe(400);
+  });
+
+  it("rejects an unknown list segment with a 404", async () => {
+    expect((await request(app).put("/api/tunnels/groups/bogus").set(AUTH).send({ groups: [] })).status).toBe(404);
+    expect((await request(app).post("/api/tunnels/groups/bogus/rename").set(AUTH).send({})).status).toBe(404);
+  });
+});
+
 describe("without a tunnel subsystem", () => {
   it("serves everything it did before, and has no tunnel routes", async () => {
-    const plain = buildApp(registry, singleTokenManager(TOKEN), managed, { user: "admin", pass: "admin" });
+    const plain = buildApp(registry, singleTokenManager(TOKEN), managed);
     expect((await request(plain).get("/health")).status).toBe(200);
     expect((await request(plain).get("/api/mcps").set(AUTH)).status).toBe(200);
     // /api/tunnels is not mounted, so it falls through to the MCP catch-all as an unknown path.

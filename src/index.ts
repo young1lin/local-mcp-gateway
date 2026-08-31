@@ -3,13 +3,16 @@ import { buildApp } from "./router.js";
 import { loadConfig } from "./config.js";
 import { log } from "./log.js";
 import { flushCalls, startCallRetention } from "./calls.js";
+import { flushTraffic, initTrafficLog } from "./traffic.js";
 import { Registry, isLazy } from "./registry.js";
 import { ManagedStore, loadManagedToken } from "./managed.js";
 import { TokenManager } from "./token.js";
 import { makeAdapter } from "./adapters/factory.js";
 import { killOrphanMcps } from "./process-tree.js";
 import { setProcPidFile, reapProcPids } from "./proc-pids.js";
+import { otherGatewayAlive } from "./process-tree.js";
 import { TunnelStore } from "./tunnels/store.js";
+import { importForwardPort } from "./tunnels/import.js";
 import { TunnelManager } from "./tunnels/manager.js";
 import { registryView } from "./tunnels/mcpmatch.js";
 import { ensureFirstRun } from "./bootstrap.js";
@@ -30,13 +33,22 @@ async function main() {
   // before close() could tree-kill them. Read from a persisted ledger of spawned PIDs, so it catches
   // ANY proc command — not just the known packages the command-match sweep below covers. Runs before
   // any proc MCP of ours starts; a cheap file read (no PowerShell) when the ledger is empty.
-  setProcPidFile(dataPath(".proc-pids.json"));
+  // The ledger file is PORT-scoped: pidfiles promise two instances on different ports coexist
+  // (gateway-<port>.pid), and a shared ledger let instance B's reap kill instance A's LIVE proc
+  // children — "alive and not my descendant" cannot tell an orphan from a neighbour's child.
+  setProcPidFile(dataPath(`.proc-pids-${cfg.port}.json`));
   await reapProcPids(process.pid);
 
   // Backstop: a command-line sweep for the known MCP packages, in case the ledger missed one (a proc
-  // child from a config since removed). No-op off Windows / when none match.
+  // child from a config since removed). No-op off Windows / when none match. Skipped entirely while
+  // another gateway instance is alive: the sweep matches COMMAND LINES, so it cannot tell A's live
+  // child of the same package from an orphan — only a lone instance may reap by name.
   if (Object.values(cfg.servers).some((s) => s.type === "proc")) {
-    await killOrphanMcps(process.pid);
+    if (await otherGatewayAlive(process.pid)) {
+      log("warn", "another gateway instance is running — skipping the orphan command sweep", {});
+    } else {
+      await killOrphanMcps(process.pid);
+    }
   }
 
   const registry = new Registry(15000);
@@ -46,6 +58,16 @@ async function main() {
   // that is simply the natural order — NOT a dependency. A rule that fails to start is logged and
   // every MCP starts regardless; nothing here blocks or delays an MCP.
   const tunnelStore = new TunnelStore(dataPath("tunnels.json"), cfg.port);
+  // First run with no tunnels.json at all: adopt the forward-port config this gateway replaced
+  // (its rules become this store's first generation). Failure is logged, never fatal.
+  if (tunnelStore.isFresh()) {
+    try {
+      const imported = importForwardPort(tunnelStore);
+      if (imported) log("info", "imported forward-port tunnels on first run", { rules: imported.rules, connections: imported.connections });
+    } catch (err) {
+      log("warn", "forward-port import failed", { err: (err as Error).message });
+    }
+  }
   const tunnels = new TunnelManager(tunnelStore, { mcps: registryView(registry) });
   for (const r of await tunnels.startEnabled()) {
     if (!r.ok) log("warn", "tunnel autostart failed", { rule: r.name, err: r.error });
@@ -107,7 +129,12 @@ async function main() {
   // authenticating (as the "default" token). A pre-multi-token rotation in managed.json takes
   // precedence over the .env seed.
   const tokens = new TokenManager(store, loadManagedToken(dataPath("managed.json")) ?? cfg.token);
-  const app = buildApp(registry, tokens, store, { user: cfg.user, pass: cfg.pass }, cfg.tokenEnv, {
+
+  // Restore the traffic ring's pre-restart tail before the server accepts requests, so the first
+  // panel poll sees the history that was there before the restart (see src/traffic.ts).
+  await initTrafficLog();
+
+  const app = buildApp(registry, tokens, store, cfg.tokenEnv, {
     store: tunnelStore,
     manager: tunnels,
   });
@@ -146,6 +173,7 @@ async function main() {
     await tunnels.closeAll();
     await registry.closeAll();
     await flushCalls(); // the last calls before a restart are the ones worth having on disk
+    await flushTraffic(); // and the last traffic rows — the ring is only the cache of this tail
     process.exit(0);
   };
   process.on("SIGINT", shutdown);

@@ -14,8 +14,12 @@ function pgHostPort(url: string): { host: string; port: number } | undefined {
   const scheme = url.indexOf("://");
   if (scheme < 0) return undefined;
   const rest = url.slice(scheme + 3);
+  // The authority ends at the first '/' OR '?' — postgresql://u:p@h:5433?sslmode=require has no
+  // path, and cutting only at '/' once glued "5433?sslmode=require" into the host.
   const slash = rest.indexOf("/");
-  const authority = slash < 0 ? rest : rest.slice(0, slash);
+  const q = rest.indexOf("?");
+  const cut = slash < 0 ? q : q < 0 ? slash : Math.min(slash, q);
+  const authority = cut < 0 ? rest : rest.slice(0, cut);
   const at = authority.lastIndexOf("@");
   const hostPart = at < 0 ? authority : authority.slice(at + 1);
   if (!hostPart) return undefined;

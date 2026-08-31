@@ -50,10 +50,25 @@ function clipBytes(text: string, maxBytes: number): string {
   return buf.subarray(0, end).toString("utf8");
 }
 
-/** Buffers serialize as `{"type":"Buffer","data":[...]}`, which is useless to a model — decode them. */
-function normalize(v: unknown): unknown {
+/** Buffers serialize as `{"type":"Buffer","data":[...]}`, which is useless to a model — decode
+ *  them. The walk is recursive through arrays and PLAIN objects (the shape SQL rows and tool
+ *  results are actually made of: a BLOB sits one level down at `rows[i].blob`, which the old
+ *  top-level-only version never touched). Class instances are passed through untouched so
+ *  JSON.stringify still honors their toJSON — Date, ObjectId, Decimal128 all have one. A WeakSet
+ *  stops a cyclic structure from recursing forever. */
+function normalize(v: unknown, seen?: WeakSet<object>): unknown {
   if (Buffer.isBuffer(v)) return v.toString("utf8");
-  if (Array.isArray(v)) return v.map(normalize);
+  if (Array.isArray(v)) return v.map((x) => normalize(x, seen));
+  if (v && typeof v === "object") {
+    const proto = Object.getPrototypeOf(v);
+    if (proto !== Object.prototype && proto !== null) return v;
+    const s = seen ?? new WeakSet<object>();
+    if (s.has(v)) return v;
+    s.add(v);
+    const out: Record<string, unknown> = {};
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) out[k] = normalize(val, s);
+    return out;
+  }
   return v;
 }
 
@@ -268,7 +283,15 @@ export function makeToolServer(
       meta.name,
       req.params.name,
       req.params.arguments,
-      async () => ({ content: [{ type: "text", text: renderResult(await call(req.params.name, req.params.arguments), limits) }] }),
+      async () => {
+        // The advertised list is the contract. A tool hidden from tools/list — a readonly mongo's
+        // write tools, or anything the operator disabled — must not be summonable back by naming
+        // it directly; before this check the handler forwarded any name the adapter's switch knew.
+        if (!tools.some((t) => t.name === req.params.name)) {
+          throw new Error(`unknown tool: ${req.params.name}`);
+        }
+        return { content: [{ type: "text", text: renderResult(await call(req.params.name, req.params.arguments), limits) }] };
+      },
       (result) => ({ ok: true, output: result.content[0].text }),
     ),
   );

@@ -292,7 +292,14 @@ export class TunnelManager {
       } else {
         rt.startedAt = now;
       }
-      this.store.setEnabled(rule.id, true);
+      // The tunnel is UP; failing to persist the enabled flag is a disk problem, not a tunnel
+      // problem. Tearing down a working forward over a transient tunnels.json write error trades
+      // a warning for a real outage (and a reconnect loop, since the in-memory flag is already set).
+      try {
+        this.store.setEnabled(rule.id, true);
+      } catch (err) {
+        log("warn", "tunnel up, but persisting enabled failed", { rule: rule.name, err: (err as Error).message });
+      }
       log("info", "tunnel up", { rule: rule.name, local: rule.localPort, target: `${rule.targetHost}:${rule.targetPort}` });
     } catch (err) {
       const te = asTunnelError(err);
@@ -322,14 +329,20 @@ export class TunnelManager {
     }
   }
 
-  /** Close any forward of ours that still holds `port` (state desync recovery). */
+  /** Close any forward of ours that still holds `port` (state desync recovery). The teardown runs
+   *  through each victim's OWN queue: the direct version bypassed the per-rule serialization every
+   *  other mutation goes through, so a stop/lost op racing on that rule could interleave with it
+   *  (two owners each closing one forward, states overwritten out of order). */
   private async closeStrayOn(port: number, exceptRuleId: string): Promise<void> {
     for (const rule of this.store.rules()) {
       if (rule.id === exceptRuleId || rule.localPort !== port) continue;
-      const rt = this.runtimes.get(rule.id);
-      if (!rt?.forward) continue;
-      await this.teardown(rt);
-      rt.state = "stopped";
+      if (!this.runtimes.get(rule.id)?.forward) continue;
+      await this.enqueue(rule.id, async () => {
+        const rt = this.runtimes.get(rule.id);
+        if (!rt?.forward) return; // already torn down while this op waited in the queue
+        await this.teardown(rt);
+        rt.state = "stopped";
+      });
     }
   }
 
@@ -411,12 +424,21 @@ export class TunnelManager {
 
   // --- edits and deletes ------------------------------------------------------------------------
 
-  /** Save a rule edit, restarting it when it was running. */
+  /** Save a rule edit, restarting it when it was running. A restart failure must not turn into a
+   *  PUT error: the edit itself already saved, and the row carries the error state — the same
+   *  contract applyConnectionUpdate below has always had (POST /rules spells it out too: "a start
+   *  failure must not undo a rule that saved fine"). */
   async applyRuleUpdate(id: string, input: RuleInput): Promise<RuleDef> {
     const wasRunning = this.isActive(id);
     if (wasRunning) await this.stopRule(id, { persist: false, force: true });
     const def = this.store.updateRule(id, input);
-    if (wasRunning) await this.startRule(id);
+    if (wasRunning) {
+      try {
+        await this.startRule(id);
+      } catch {
+        /* the rule holds its own error state */
+      }
+    }
     return def;
   }
 
@@ -455,7 +477,11 @@ export class TunnelManager {
   }
 
   async deleteConnection(id: string): Promise<void> {
-    // The store refuses while rules reference it, naming them — that message is the useful one.
+    if (!this.store.connection(id)) throw new Error(`unknown SSH connection: ${id}`);
+    // Rules still riding this connection block the delete — as DependentsError, so the API answers
+    // 409 + a structured list exactly like rule deletion, instead of a stringy 400-for-everything.
+    const usedBy = this.store.rulesForConnection(id).map((r) => r.name);
+    if (usedBy.length) throw new DependentsError(usedBy);
     this.store.removeConnection(id);
     const c = this.conns.get(id);
     if (c) {
@@ -472,8 +498,9 @@ export class TunnelManager {
     const res = await SshConnection.test(def);
     if (!res.ok && res.kind === "hostkey" && res.fingerprint) this.mismatches.set(id, res.fingerprint);
     if (res.ok && !def.hostKey) {
-      // The throwaway client learned the fingerprint through the same hook path; nothing to do here,
-      // but re-read so the caller sees the stored value.
+      // NOTE: the throwaway test client runs WITHOUT the persistence hook, so a successful Test of a
+      // keyless connection stores nothing — the first real connect (a rule start) is what learns
+      // and persists the fingerprint. Re-read only so the caller sees whatever IS stored.
       return { ...res, hostKey: this.store.connection(id)?.hostKey };
     }
     return res;
@@ -493,7 +520,9 @@ export class TunnelManager {
       this.conns.get(id)?.setDef(this.store.connection(id)!);
       return presented;
     }
-    this.store.updateConnection(id, { ...def, hostKey: undefined } as ConnInput);
+    // Not updateConnection({...def, hostKey: undefined}): the store deliberately re-adopts a
+    // learned key when host/port are unchanged, which would silently undo this clear.
+    this.store.clearHostKey(id);
     return undefined;
   }
 
@@ -585,6 +614,7 @@ export class TunnelManager {
         port: c.port,
         username: c.username,
         authType: c.authType,
+        group: c.group,
         state: live?.state ?? "idle",
         reason: live?.reason,
         hostKey: c.hostKey,

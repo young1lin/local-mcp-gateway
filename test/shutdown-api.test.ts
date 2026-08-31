@@ -34,13 +34,16 @@ afterEach(async () => {
 const settle = () => new Promise((r) => setImmediate(r));
 
 describe("POST /api/shutdown", () => {
-  it("refuses without the bearer token, and stops nothing", async () => {
+  // No credential gate on /api anymore — the loopback guard ahead of every route is the boundary,
+  // and only this machine can reach it.
+  it("answers and stops without credentials", async () => {
     const { app } = setup();
     let raised = 0;
     setShutdownSignal(() => raised++);
-    expect((await request(app).post("/api/shutdown")).status).toBe(401);
+    const res = await request(app).post("/api/shutdown");
+    expect(res.status).toBe(200);
     await settle();
-    expect(raised).toBe(0);
+    expect(raised).toBe(1);
   });
 
   // Answering in full is the contract: `lmg stop` tells a clean shutdown from a crash by receiving

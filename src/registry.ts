@@ -69,6 +69,10 @@ export interface RegistryEntry {
    *  fans a change event out to every active subscriptions/listen stream a 2026-07-28 client holds.
    *  Cleared on stop/restart. */
   notifier?: ServerNotifier;
+  /** Set by delete() while a queued start may still hold a reference to this entry: doStart
+   *  refuses to build on a tombstoned entry, so a server built after the delete cannot leak
+   * outside the registry with no entry left to close it (see delete). */
+  deleted?: boolean;
 }
 
 /** A flat row for the dashboard / API, with a resolved display state. */
@@ -248,6 +252,7 @@ export class Registry {
 
   private async doStart(e: RegistryEntry): Promise<void> {
     const name = e.name;
+    if (e.deleted) throw new Error(`unknown MCP: ${name}`); // delete() won the race — this entry is gone
     if (e.server) return; // already running
     e.gen++;
     e.lifecycle = "starting";
@@ -341,23 +346,32 @@ export class Registry {
     this.entries.delete(oldName);
     this.entries.set(newName, e);
     this.onEvict?.(oldName); // the handler cached under the old name is now unreachable — close + free it
+    // The notifier belonged to THAT evicted handler (doStop clears it; a rename without a stop
+    // never did) — without this, a toggle between the rename and the next POST would notify a
+    // closed handler.
+    e.notifier = undefined;
     // Carry the call history over and re-key the adapter, so a rename doesn't split one MCP's log
     // into a dead half and an empty half.
     await renameCalls(oldName, newName);
     e.adapter.rename?.(newName);
   }
 
-  /** Remove a managed MCP. Config MCPs cannot be deleted (stop them instead). */
+  /** Remove an MCP, whatever its source: stop it first, then drop the runtime entry and its call
+   *  log. (Config MCPs used to be refused here — deleting one left its gateway.config.json entry
+   *  behind, so it resurrected on the next start. The admin API now removes the file entry too,
+   *  which is what makes deleting a config MCP honest; the runtime half flows through here.) */
   async delete(name: string): Promise<void> {
     const e = this.require(name);
-    if (e.source === "config") {
-      throw new Error(`cannot delete config MCP '${name}' (stop it instead)`);
-    }
+    // Tombstone BEFORE awaiting the stop: a start already queued on this entry (or arriving during
+    // the stop) would otherwise run doStart on the detached entry after entries.delete — building
+    // a pool/child nothing will ever close, and arming an idle-reap whose stop() then throws
+    // "unknown MCP" into a .catch that eats it. The queued start checks the flag and refuses.
+    e.deleted = true;
     await this.stop(name);
     this.entries.delete(name);
     this.onEvict?.(name); // free the cached handler — the POST path won't, for a name that no longer exists
     await clearCalls(name); // nothing left to show it against
-    log("info", "mcp deleted", { name });
+    log("info", "mcp deleted", { name, source: e.source });
   }
 
   // --- health probing (started entries only) ---

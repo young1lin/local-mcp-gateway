@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   CALLS_PAGE_SIZE, clearCalls, contentText, currentCallSource, flushCalls, logged, readCall, readCalls,
-  forgetCallAlias, recordCall, renameCalls, setCallLogDir, startCallRetention, sweepCallLogs, withCallSource,
+  forgetCallAlias, readToolHistory, recordCall, renameCalls, setCallLogDir, startCallRetention,
+  sweepCallLogs, withCallSource,
 } from "../src/calls.js";
 
 const dir = mkdtempSync(join(tmpdir(), "mcp-calls-"));
@@ -41,6 +42,17 @@ describe("call log", () => {
     expect(entry.args).toContain("deploy");
     expect(entry.args).not.toContain("hunter2");
     expect(entry.args).not.toContain("abc");
+  });
+
+  it("redacts apiKey/authorization args — the wordlist the traffic ring always had", async () => {
+    // This copy once lacked authorization|api[_-]?key: the same request was redacted in the traffic
+    // view yet written PLAINTEXT here — and this file is the one that persists to disk.
+    recordCall(MCP, { tool: "t", args: { apiKey: "sk-live-1", Authorization: "Bearer jt", passphrase: "pp", note: "keep" }, ok: true, ms: 1, output: "" });
+    const [entry] = await entries();
+    expect(entry.args).not.toContain("sk-live-1");
+    expect(entry.args).not.toContain("jt");
+    expect(entry.args).not.toContain("pp");
+    expect(entry.args).toContain("keep");
   });
 
   it("survives a restart: a fresh reader sees the history and keeps counting", async () => {
@@ -140,6 +152,10 @@ describe("call log", () => {
     expect((await readCalls("renamed-mcp")).calls.length).toBe(1);
     await clearCalls("renamed-mcp");
     expect((await readCalls("renamed-mcp")).calls).toEqual([]);
+    // The alias is the whole point of renameCalls, but it is process-global: left in place, every
+    // LATER recordCall(MCP) in this file would silently file under "renamed-mcp" instead. The name is
+    // free again now, exactly as when the registry registers a new MCP under it.
+    forgetCallAlias(MCP);
   });
 
   it("ignores a call with no MCP name (an adapter built without one)", async () => {
@@ -246,5 +262,86 @@ describe("call log retention", () => {
       const list = (await readCalls(AGED)).calls;
       expect(list.map((c) => c.seq)).toEqual([8, 7]); // seq continues from the surviving tail
       expect(list[0].tool).toBe("after");
+    });
+  });
+
+  describe("readToolHistory (the Run tab's refill dropdown)", () => {
+    it("lists one tool's newest runs first, skipping other tools, with a one-line args preview", async () => {
+      recordCall(MCP, { tool: "pg_query", args: { sql: "SELECT 1" }, ok: true, ms: 2, output: "a" });
+      recordCall(MCP, { tool: "other", args: {}, ok: true, ms: 1, output: "b" });
+      recordCall(MCP, { tool: "pg_query", args: { sql: "SELECT\n  2\nFROM t" }, ok: false, ms: 4, output: "boom" });
+
+      const hist = await readToolHistory(MCP, "pg_query");
+      expect(hist.map((h) => h.seq)).toEqual([3, 1]); // newest first; the other tool never appears
+      expect(hist[0]).toMatchObject({ via: "mcp", ok: false, ms: 4 });
+      // JSON.stringify escapes the newlines, so they stay as \n escapes; the REAL whitespace around
+      // them (the two-space indent) is what oneLine folds — a label is one line, spaces collapsed.
+      expect(hist[0].args).toBe('{"sql":"SELECT\\n 2\\nFROM t"}');
+      expect(hist[1].args).toBe('{"sql":"SELECT 1"}');
+    });
+
+    it("cuts a long args preview off, so one huge argument set cannot bloat the dropdown", async () => {
+      recordCall(MCP, { tool: "wide", args: { q: "x".repeat(500) }, ok: true, ms: 1, output: "" });
+      const [entry] = await readToolHistory(MCP, "wide");
+      expect(entry.args.length).toBeLessThanOrEqual(97); // 96 chars + the ellipsis
+      expect(entry.args).toContain("…");
+    });
+
+    it("collapses repeated runs of the same arguments into one entry, keeping the newest", async () => {
+      recordCall(MCP, { tool: "t", args: { sql: "SELECT 1" }, ok: true, ms: 1, output: "" });
+      recordCall(MCP, { tool: "t", args: { sql: "SELECT 2" }, ok: true, ms: 1, output: "" });
+      recordCall(MCP, { tool: "t", args: { sql: "SELECT 1" }, ok: true, ms: 1, output: "" }); // repeat
+      recordCall(MCP, { tool: "t", args: { sql: "SELECT 1" }, ok: true, ms: 1, output: "" }); // repeat
+
+      const hist = await readToolHistory(MCP, "t");
+      // Newest first: the repeated SELECT 1 is represented by its newest run (seq 4), then SELECT 2.
+      expect(hist.map((h) => h.args)).toEqual(['{"sql":"SELECT 1"}', '{"sql":"SELECT 2"}']);
+      expect(hist[0].seq).toBe(4); // the newest occurrence of the repeated arguments, not the first
+    });
+
+    it("keeps two long argument sets apart that merely share a clipped preview prefix", async () => {
+      // Both previews clip to the same 96 chars, but the stored arguments differ — distinct is
+      // decided on the full string, so both must appear.
+      const base = "x".repeat(120);
+      recordCall(MCP, { tool: "t", args: { q: base + "A" }, ok: true, ms: 1, output: "" });
+      recordCall(MCP, { tool: "t", args: { q: base + "B" }, ok: true, ms: 1, output: "" });
+      const hist = await readToolHistory(MCP, "t");
+      expect(hist).toHaveLength(2);
+      expect(hist[0].args).toBe(hist[1].args); // identical previews…
+      expect(hist[0].seq).not.toBe(hist[1].seq); // …yet two entries, because the runs differ
+    });
+
+    it("filters by a case-insensitive substring of the FULL arguments, past the preview's clip", async () => {
+      // The needle sits 200 chars in — far past the 96-char label — so only a match on the stored
+      // arguments in full can find it. That is the dropdown's search box doing its one job.
+      const pad = "y".repeat(200);
+      recordCall(MCP, { tool: "f", args: { sql: pad + " ORDER BY rare_needle" }, ok: true, ms: 1, output: "" });
+      recordCall(MCP, { tool: "f", args: { sql: "SELECT 1" }, ok: true, ms: 1, output: "" });
+      recordCall(MCP, { tool: "f", args: { sql: pad + " ORDER BY other" }, ok: true, ms: 1, output: "" });
+
+      const hit = await readToolHistory(MCP, "f", undefined, "rare_needle");
+      expect(hit).toHaveLength(1);
+      expect(hit[0].args).not.toContain("rare_needle"); // the label is clipped; the match was not
+
+      expect((await readToolHistory(MCP, "f", undefined, "RARE_NEEDLE"))).toHaveLength(1); // case-blind
+
+      expect((await readToolHistory(MCP, "f", undefined, "no-such-text"))).toHaveLength(0);
+
+      const all = await readToolHistory(MCP, "f", undefined, "   "); // blank query = no filter
+      expect(all).toHaveLength(3);
+    });
+
+    it("honours a smaller limit and never exceeds 300, however it is asked for", async () => {
+      // Distinct arguments each call — the limit counts DISTINCT entries now, so the calls must vary.
+      for (let i = 1; i <= 305; i++) recordCall(MCP, { tool: "t", args: { i }, ok: true, ms: 0, output: "" });
+      expect((await readToolHistory(MCP, "t", 3)).map((h) => h.seq)).toEqual([305, 304, 303]);
+      const capped = await readToolHistory(MCP, "t", 99_999);
+      expect(capped).toHaveLength(300);
+      expect(capped[0].seq).toBe(305); // the newest 300, not the oldest
+    });
+
+    it("answers an empty list for a tool that was never called", async () => {
+      recordCall(MCP, { tool: "here", ok: true, ms: 0, output: "" });
+      expect(await readToolHistory(MCP, "never")).toEqual([]);
     });
   });

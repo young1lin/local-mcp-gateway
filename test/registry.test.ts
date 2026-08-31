@@ -81,11 +81,15 @@ describe("Registry lifecycle", () => {
     expect(r.has("a")).toBe(false);
   });
 
-  it("refuses to delete a config MCP", async () => {
+  // The old refusal existed because deleting a config MCP left its gateway.config.json entry
+  // behind, so it resurrected on restart. The admin API now removes the file entry too — the
+  // registry half deletes any source, stopping first.
+  it("deletes a config MCP as well (stop first, then drop the entry)", async () => {
     const r = reg();
     r.register("a", "config", { type: "fake" }, fakeAdapter());
     await r.start("a");
-    await expect(r.delete("a")).rejects.toThrow(/cannot delete config/);
+    await r.delete("a");
+    expect(r.has("a")).toBe(false);
   });
 });
 
@@ -201,5 +205,37 @@ describe("Registry health probing", () => {
     // and nothing resets lastError for a stopped entry, so it would have stuck until a restart.
     expect(r.get("a")!.lastError).toBeUndefined();
     expect(r.get("a")!.status).toBe("unknown");
+  });
+});
+
+describe("Registry delete vs a queued start", () => {
+  it("refuses a start that slips into the delete window instead of building on the detached entry", async () => {
+    let builds = 0;
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    const slowClose: Adapter = {
+      type: "fake",
+      async build() { builds++; return echoAdapter.build(); },
+      async close() { await held; },
+    };
+    const r = new Registry(60000);
+    r.register("x", "managed", { type: "fake" }, slowClose);
+    await r.start("x");
+    expect(builds).toBe(1);
+
+    // delete() parks inside adapter.close(); a start arriving in that window enqueues behind the
+    // stop and runs AFTER entries.delete — on the detached entry, where doStart must refuse.
+    const del = r.delete("x");
+    await new Promise((resolve) => setTimeout(resolve, 5)); // let the delete reach close()
+    // Attach the handlers IMMEDIATELY: the refusal rejects while `await del` is still pending, and
+    // a promise rejected in that window with no handler yet attached is an unhandledRejection.
+    const lateStart = r.start("x").then(
+      () => { throw new Error("expected the late start to refuse"); },
+      (err: Error) => err,
+    );
+    release();
+    await del;
+    expect((await lateStart).message).toMatch(/unknown MCP: x/);
+    expect(builds).toBe(1); // nothing was built that no entry would ever close
   });
 });

@@ -1,8 +1,46 @@
 import { describe, it, expect } from "vitest";
 import {
-  isReadOnlySql, assertReadOnly, withRowLimit, clampRowLimit, dropNullColumns, limitReport,
+  isReadOnlySql, assertReadOnly, withRowLimit, clampRowLimit, dropNullColumns, limitReport, likeContains,
+  tablePageArgs, DEFAULT_TABLE_LIMIT, MAX_TABLE_LIMIT,
   DEFAULT_ROW_LIMIT, MAX_ROW_LIMIT,
 } from "../src/adapters/sql.js";
+
+describe("tablePageArgs (list_tables limit/page)", () => {
+  it("defaults to page 0 and the default limit", () => {
+    expect(tablePageArgs(undefined)).toEqual({ page: 0, limit: DEFAULT_TABLE_LIMIT, offset: 0 });
+    expect(tablePageArgs({})).toEqual({ page: 0, limit: DEFAULT_TABLE_LIMIT, offset: 0 });
+  });
+
+  it("honours a sane page and limit", () => {
+    expect(tablePageArgs({ page: 2, limit: 50 })).toEqual({ page: 2, limit: 50, offset: 100 });
+  });
+
+  it("clamps the limit at the ceiling, never below the default", () => {
+    expect(tablePageArgs({ limit: 100000 }).limit).toBe(MAX_TABLE_LIMIT);
+    expect(tablePageArgs({ limit: 1 }).limit).toBe(1);
+    expect(tablePageArgs({ limit: 0 }).limit).toBe(DEFAULT_TABLE_LIMIT); // 0 is not a page size
+    expect(tablePageArgs({ limit: "x" }).limit).toBe(DEFAULT_TABLE_LIMIT); // nonsense reads as default
+  });
+
+  it("reads a nonsense page as 0, never negative", () => {
+    expect(tablePageArgs({ page: -3 }).page).toBe(0);
+    expect(tablePageArgs({ page: "x" }).page).toBe(0);
+  });
+});
+
+describe("likeContains", () => {
+  it("wraps the filter as a substring pattern", () => {
+    expect(likeContains("users")).toBe("%users%");
+    expect(likeContains("")).toBe("%%");
+  });
+
+  it("escapes the LIKE wildcards, so a filter matches literally instead of widening", () => {
+    // A table-name filter is full of underscores; an unescaped _ would match ANY character there.
+    expect(likeContains("p_users")).toBe("%p!_users%");
+    expect(likeContains("100%")).toBe("%100!%%");
+    expect(likeContains("a!b")).toBe("%a!!b%");
+  });
+});
 
 describe("isReadOnlySql", () => {
   it("accepts plain reads", () => {
@@ -207,5 +245,90 @@ describe("isReadOnlySql literal handling", () => {
   it("still rejects a real write behind WITH or EXPLAIN", () => {
     expect(isReadOnlySql("WITH gone AS (DELETE FROM t RETURNING *) SELECT 1")).toBe(false);
     expect(isReadOnlySql("EXPLAIN ANALYZE INSERT INTO t VALUES (1)")).toBe(false);
+  });
+});
+
+describe("isReadOnlySql backslash in string literals (PG standard_conforming_strings)", () => {
+  it("is not fooled by a PG string that ends at a backslash-preceded quote", () => {
+    // In Postgres (standard_conforming_strings=on) the backslash is an ordinary character, so the
+    // literal ends at the second quote and the rest is a SECOND statement on the simple query
+    // protocol. The old MySQL-style backslash skip masked that whole tail as string content and
+    // let the write through as "a plain SELECT".
+    for (const sql of [
+      "SELECT 'a\\'; DROP TABLE t; --'",
+      "SELECT 'a\\'; DELETE FROM users; --'",
+      "select * from t where note = 'x\\'; update t set a = 1; --'",
+    ]) {
+      expect(isReadOnlySql(sql), sql).toBe(false);
+    }
+  });
+
+  it("keeps accepting a MySQL \\' literal with nothing stacked behind it", () => {
+    // 'it\'s' closes early under standard-SQL masking, but the visible tail is just "s'" — no
+    // separator, no keyword — so the over-rejection this fix can cost MySQL does not bite here.
+    expect(isReadOnlySql("SELECT * FROM t WHERE note = 'it\\'s'")).toBe(true);
+  });
+});
+
+describe("isReadOnlySql SELECT ... INTO writes", () => {
+  it("refuses the INTO family behind a read-looking statement", () => {
+    // None of these names a keyword WRITE_RE knows, so the select/table/values branch used to
+    // wave them through: INTO newtable creates, OUTFILE/DUMPFILE write files, INTO @var assigns.
+    for (const sql of [
+      "SELECT * INTO new_table FROM users",
+      "SELECT c1, c2 INTO archive FROM users",
+      "SELECT * FROM users INTO OUTFILE '/tmp/out.csv'",
+      "SELECT * FROM users INTO DUMPFILE '/tmp/dump.bin'",
+      "SELECT id, name INTO @a, @b FROM users",
+      "SELECT * FROM (SELECT * INTO x FROM y) z",
+    ]) {
+      expect(isReadOnlySql(sql), sql).toBe(false);
+    }
+  });
+
+  it("does not match INTO buried in a literal or an identifier", () => {
+    expect(isReadOnlySql("SELECT * FROM t WHERE note = 'select into outfile'")).toBe(true);
+    expect(isReadOnlySql('SELECT * FROM "into"')).toBe(true);
+    expect(isReadOnlySql("SELECT * FROM point_into")).toBe(true);
+  });
+});
+
+describe("isReadOnlySql statements that open with parentheses", () => {
+  it("accepts reads behind leading parentheses", () => {
+    // The first-word match used to read "" at a "(" and reject the query outright.
+    for (const sql of [
+      "(SELECT 1)",
+      "((select 1) union (select 2))",
+      " ( select * from users where id = 3 ) ",
+      "(with r AS (SELECT * FROM p) SELECT * FROM r)",
+    ]) {
+      expect(isReadOnlySql(sql), sql).toBe(true);
+    }
+  });
+
+  it("still refuses writes, stacks and writing CTEs behind parentheses", () => {
+    expect(isReadOnlySql("(DROP TABLE t)")).toBe(false);
+    expect(isReadOnlySql("(SELECT 1); DROP TABLE t")).toBe(false);
+    expect(isReadOnlySql("(with gone AS (DELETE FROM t RETURNING *) SELECT 1)")).toBe(false);
+  });
+});
+
+describe("withRowLimit after the PG-string masking fix", () => {
+  it("still caps a MySQL \\' literal whose tail holds no separator or LIMIT", () => {
+    const r = withRowLimit("SELECT * FROM t WHERE note = 'it\\'s'", 9);
+    expect(r.sql).toBe("SELECT * FROM t WHERE note = 'it\\'s' LIMIT 9");
+    expect(r.limitApplied).toBe(9);
+  });
+
+  it("no longer caps a MySQL statement whose \\' hides a top-level-looking separator", () => {
+    // In MySQL this is ONE statement — \' is an escaped quote, so the ";" sits inside the literal.
+    // Standard-SQL masking now closes the string at that quote, the scanner sees a second
+    // statement, and withRowLimit stands down instead of appending LIMIT behind a write-looking
+    // tail. Over-caution in the safe direction; documented in maskLiterals.
+    const mysql = "select * from t where note = 'a\\'; select 2'";
+    const r = withRowLimit(mysql, 9);
+    expect(r.sql).toBe(mysql);
+    expect(r.limitApplied).toBeUndefined();
+    expect(r.note).toMatch(/several statements/);
   });
 });

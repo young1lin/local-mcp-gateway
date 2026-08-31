@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { appendFile, mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { log } from "./log.js";
+import { SECRET_ARG_KEY_RE } from "./mask.js";
 import { dataPath } from "./datadir.js";
 import { chmodPrivate } from "./privfs.js";
 
@@ -156,8 +157,9 @@ function state(mcp: string): FileState {
   return s;
 }
 
-/** Argument names whose value must never be written into a log line. */
-const SECRET_ARG_RE = /(password|passwd|secret|token|credential)/i;
+/** Argument names whose value must never be written into a log line — the shared wordlist from
+ *  mask.ts (this copy once lacked authorization|api[_-]?key, and apiKey args landed on disk). */
+const SECRET_ARG_RE = SECRET_ARG_KEY_RE;
 const REDACTED = "•••";
 
 function clip(text: string, max: number): string {
@@ -255,7 +257,7 @@ function isTransientRenameError(err: unknown): boolean {
  * once with EPERM — which used to make a retention sweep silently no-op until its next hourly try.
  * One short retry absorbs exactly that; anything persistent still propagates to the queue's catch.
  */
-async function writeFileRenamed(path: string, data: string | Uint8Array): Promise<void> {
+export async function writeFileRenamed(path: string, data: string | Uint8Array): Promise<void> {
   const tmp = `${path}.tmp`;
   for (let attempt = 0; ; attempt++) {
     try {
@@ -269,9 +271,12 @@ async function writeFileRenamed(path: string, data: string | Uint8Array): Promis
   }
 }
 
-/** Drop the oldest history once the file outgrows its budget, keeping the newest KEEP_BYTES. */
+/** Drop the oldest history once the file outgrows its budget, keeping the newest KEEP_BYTES.
+ *  The read handle closes BEFORE the tmp→rename swap: Windows refuses to replace a file that is
+ *  still open, so every trim used to fail EPERM the moment the log first crossed its budget. */
 async function trim(mcp: string, s: FileState): Promise<void> {
   const path = fileFor(mcp);
+  let kept: Buffer;
   const handle = await open(path, "r");
   try {
     const info = await handle.stat();
@@ -280,13 +285,13 @@ async function trim(mcp: string, s: FileState): Promise<void> {
     await handle.read(buf, 0, buf.length, start);
     // Start at the first line boundary, so the file never begins with half an entry.
     const nl = buf.indexOf(0x0a);
-    const kept = nl >= 0 ? buf.subarray(nl + 1) : Buffer.alloc(0);
-    await writeFileRenamed(path, kept);
-    s.bytes = kept.length;
-    log("info", "call log trimmed", { mcp, keptBytes: kept.length });
+    kept = nl >= 0 ? buf.subarray(nl + 1) : Buffer.alloc(0);
   } finally {
     await handle.close();
   }
+  await writeFileRenamed(path, kept!);
+  s.bytes = kept!.length;
+  log("info", "call log trimmed", { mcp, keptBytes: kept!.length });
 }
 
 /**
@@ -402,7 +407,7 @@ export async function flushCalls(mcp?: string): Promise<void> {
  * history is. Splitting on 0x0A is safe for UTF-8 (a newline byte cannot occur inside a multi-byte
  * sequence), so chunk boundaries never corrupt a character.
  */
-async function tailLines(path: string, want: number): Promise<{ lines: string[]; more: boolean }> {
+export async function tailLines(path: string, want: number): Promise<{ lines: string[]; more: boolean }> {
   const CHUNK = 64 * 1024;
   let handle;
   try {
@@ -492,6 +497,79 @@ export async function readCall(mcp: string, seq: number): Promise<CallEntry | un
   } catch {
     return { ...entry, bodyGone: true };
   }
+}
+
+/** One entry of a single tool's recent-run history — the Run tab's refill dropdown. */
+export interface ToolHistoryEntry {
+  seq: number;
+  at: string;
+  via: string;
+  client?: string;
+  ok: boolean;
+  ms: number;
+  /** One-line args preview, sized for a dropdown label; the full set is fetched by seq when picked. */
+  args: string;
+}
+
+/** Fold whitespace and clip, so a stored multi-line args blob still reads as one label line. */
+function oneLine(text: string, max = 96): string {
+  const s = text.replace(/\s+/g, " ").trim();
+  return s.length <= max ? s : s.slice(0, max) + "…";
+}
+
+/** How many entries the refill dropdown may list. The index line holds up to 4 KB of args, so the
+ *  ceiling keeps the reply bounded however it is asked for. */
+export const TOOL_HISTORY_MAX = 300;
+
+/**
+ * The newest DISTINCT runs of ONE tool, newest first — what the panel's Run tab offers to refill the
+ * argument form with. Both sources are included (the panel's Run button and MCP clients), because
+ * "what the client sent last" is as often the thing worth re-running as your own previous attempt.
+ *
+ * Runs whose arguments are identical are collapsed to one entry — the newest occurrence — because the
+ * dropdown answers "what was last executed", not "how often it was executed". Distinctness is decided
+ * on the FULL stored arguments, never on the clipped preview: two long argument sets sharing a
+ * 96-character prefix are different runs and must not merge. The limit counts DISTINCT entries, so a
+ * tool whose whole history is one repeated call lists one entry, not 300 copies of it.
+ *
+ * `q`, when given, keeps only the runs whose FULL stored arguments contain it (case-insensitive).
+ * The match is deliberately NOT on the clipped preview the caller gets back: a keyword sitting past
+ * the 96-character label must still find its run — that filter is the dropdown's search box.
+ *
+ * Same whole-index read readCall() already performs on a "show full result" click: the file is
+ * chronological and capped at MAX_BYTES, so one backwards scan filtered by tool name is the whole
+ * cost. Args come back as a short single-line preview — the label is all the dropdown shows; the
+ * complete arguments of a picked entry are one seq lookup away (readCall).
+ */
+export async function readToolHistory(
+  mcp: string,
+  tool: string,
+  limit = TOOL_HISTORY_MAX,
+  q?: string,
+): Promise<ToolHistoryEntry[]> {
+  await flushCalls(mcp);
+  const size = Math.max(1, Math.min(Math.floor(limit) || 1, TOOL_HISTORY_MAX));
+  const needle = (q ?? "").trim().toLowerCase();
+  const tail = await tailLines(fileFor(mcp), Number.MAX_SAFE_INTEGER);
+  const out: ToolHistoryEntry[] = [];
+  const seen = new Set<string>();
+  for (const e of parseLines(tail.lines)) {
+    if (e.tool !== tool) continue;
+    if (needle && !e.args.toLowerCase().includes(needle)) continue;
+    if (seen.has(e.args)) continue; // same arguments → same dropdown entry; the newest is already in
+    seen.add(e.args);
+    out.push({
+      seq: e.seq,
+      at: e.at,
+      via: e.via,
+      ...(e.client ? { client: e.client } : {}),
+      ok: e.ok,
+      ms: e.ms,
+      args: oneLine(e.args),
+    });
+    if (out.length >= size) break;
+  }
+  return out;
 }
 
 /** Forget an MCP's history (the panel's Clear button, and deleting an MCP). */

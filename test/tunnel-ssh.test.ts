@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { classify, expandHome, fingerprint, loadSsh2, SshConnection } from "../src/tunnels/ssh.js";
+import { classify, connectConfig, expandHome, fingerprint, loadSsh2, SshConnection } from "../src/tunnels/ssh.js";
 import { TunnelError, isRetryable, type SshConnDef } from "../src/tunnels/types.js";
 
 const base: SshConnDef = {
@@ -18,6 +18,36 @@ describe("expandHome", () => {
     expect(expandHome("~")).toBe(homedir());
     expect(expandHome("C:/keys/id_rsa")).toBe("C:/keys/id_rsa");
     expect(expandHome("  ~/x  ")).toBe(join(homedir(), "x"));
+  });
+});
+
+describe("classify (ssh2's synchronous throws)", () => {
+  it("treats an unparseable key or a missing passphrase as auth — never retried", () => {
+    // ssh2 throws these from connect() before any dial; they used to fall through to "network",
+    // and an auto-reconnect rule retried a credential problem forever.
+    expect(classify(new Error("Cannot parse privateKey: Unsupported key format"))).toBe("auth");
+    expect(classify(new Error("Cannot parse privateKey: Encrypted private key detected but no passphrase given"))).toBe("auth");
+    expect(isRetryable(classify(new Error("Cannot parse privateKey: bad passphrase")))).toBe(false);
+  });
+});
+
+describe("connectConfig (${ENV} credential refs)", () => {
+  it("expands a ${VAR} password at connect time and passes a literal through untouched", () => {
+    process.env.TUN_TEST_PW = "s3cret";
+    try {
+      const ref = connectConfig(
+        { ...base, authType: "password", password: "${TUN_TEST_PW}" },
+        () => {}, {},
+      ) as { password: string };
+      expect(ref.password).toBe("s3cret");
+      const literal = connectConfig(
+        { ...base, authType: "password", password: "plain" },
+        () => {}, {},
+      ) as { password: string };
+      expect(literal.password).toBe("plain");
+    } finally {
+      delete process.env.TUN_TEST_PW;
+    }
   });
 });
 

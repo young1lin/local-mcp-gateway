@@ -14,6 +14,12 @@ export interface ProxyOpts {
   /** Expose the remote's prompts (default true). */
   exposePrompts?: boolean;
   /**
+   * Deadline for a single proxied `tools/call`, in ms. Omit to inherit the SDK's own default
+   * (60s) — fine for a remote whose replies are fast, wrong for anything doing real inference.
+   * The caller owns this because only it knows what its remote does; see PROC_CALL_TIMEOUT_MS.
+   */
+  callTimeoutMs?: number;
+  /**
    * What the remote actually negotiated, when known. A capability is announced only if the toggle
    * above allows it AND the remote has it — otherwise clients ask for lists that cannot exist, which
    * against a metered remote is a round trip billed for a guaranteed empty answer. Omit to announce
@@ -63,7 +69,7 @@ export function makeProxyServer(client: Client, opts: ProxyOpts = {}): Server {
       opts.name,
       req.params.name,
       req.params.arguments,
-      () => client.callTool(req.params as never),
+      () => client.callTool(req.params as never, opts.callTimeoutMs ? { timeout: opts.callTimeoutMs } : undefined),
       (result) => ({ ok: !(result as { isError?: boolean }).isError, output: contentText(result) }),
     ),
   );
@@ -72,7 +78,16 @@ export function makeProxyServer(client: Client, opts: ProxyOpts = {}): Server {
   // schemas) to keep client context clean. A probe against a hidden capability gets Method Not Found.
   if (exposeResources) {
     server.setRequestHandler('resources/list', async () => safe(client.listResources(), { resources: [] }));
-    server.setRequestHandler('resources/read', async (req) => client.readResource(req.params as never));
+    // Logged like tools/call above (and like the direct adapters' mountResources): a read is a
+    // billed/observable action on the remote, and the Logs tab must show it either way.
+    server.setRequestHandler('resources/read', async (req) =>
+      logged(
+        opts.name,
+        "resources/read",
+        { uri: (req.params as { uri?: string }).uri },
+        () => client.readResource(req.params as never),
+        (result) => ({ ok: true, output: JSON.stringify(result).slice(0, 200) }),
+      ));
   }
   if (exposePrompts) {
     server.setRequestHandler('prompts/list', async () => safe(client.listPrompts(), { prompts: [] }));

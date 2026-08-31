@@ -19,14 +19,21 @@ export function isReadOnlySql(sql: string): boolean {
   // Drop a single trailing terminator first: `SELECT 1;` is one statement, not two.
   const s = maskLiterals(sql).replace(/\s+$/, "").replace(/;\s*$/, "").trim();
   if (!s) return false;
-  const first = (s.match(/^[a-z]+/i)?.[0] ?? "").toLowerCase();
+  // Leading "("s are layout, not a keyword: "((select 1) union (select 2))" is a plain read.
+  const body = s.replace(/^[\s(]+/, "");
+  const first = (body.match(/^[a-z]+/i)?.[0] ?? "").toLowerCase();
   if (!READ_FIRST.has(first)) return false;
   // A second statement rides along for free on the simple query protocol — node-postgres uses it for
   // any query passed as a bare string, so `SELECT 1; DROP TABLE users` would execute both. Refuse
   // anything that still holds a separator once literals and comments are out of the way.
   if (s.includes(";")) return false;
+  const rest = body.slice(first.length);
+  // `SELECT ... INTO` writes behind a read-looking verb: INTO newtable creates one, OUTFILE/
+  // DUMPFILE write files, INTO @var assigns. None names a keyword WRITE_RE knows, so this check
+  // is its own — and it runs on masked text, so an INTO inside a literal or identifier is safe.
+  if (/\binto\b/i.test(rest)) return false;
   // `WITH x AS (...) DELETE ...` and `EXPLAIN ANALYZE INSERT ...` read like reads but are not.
-  if (first === "with" || first === "explain") return !WRITE_RE.test(s.slice(first.length));
+  if (first === "with" || first === "explain") return !WRITE_RE.test(rest);
   return true;
 }
 
@@ -56,6 +63,48 @@ export function dropNullColumns<T>(rows: T[]): T[] {
   });
 }
 
+// --- table-name filtering -------------------------------------------------------------------------
+
+/**
+ * Turn a `grep` argument into a LIKE/ILIKE pattern that matches it as a literal substring.
+ *
+ * `users` becomes `%users%`, so `p_users` and `users_settings` both match. `%` and `_` (and the
+ * `!` that escapes them — every LIKE here runs with `ESCAPE '!'`, as in mysql-resources.ts) are
+ * escaped first, so a filter full of underscores keeps matching literally instead of silently
+ * widening the search. Case-insensitivity comes from the database side: ILIKE in Postgres, and
+ * MySQL's default case-insensitive collation for LIKE.
+ */
+export function likeContains(filter: string): string {
+  return `%${filter.replace(/[!%_]/g, (c) => `!${c}`)}%`;
+}
+
+// --- table-list paging ----------------------------------------------------------------------------
+
+/** Tables per page for pg_list_tables / mysql_list_tables when the caller passes no limit. */
+export const DEFAULT_TABLE_LIMIT = 200;
+/** Ceiling on a requested page, so one listing cannot flood a context by asking for a million. */
+export const MAX_TABLE_LIMIT = 1000;
+
+/** A clamped page request: 0-based `page`, the clamped `limit`, and the SQL `offset`. */
+export interface TablePage {
+  page: number;
+  limit: number;
+  offset: number;
+}
+
+/**
+ * Clamp a list_tables call's `limit`/`page` arguments: limit defaults to DEFAULT_TABLE_LIMIT and
+ * never exceeds MAX_TABLE_LIMIT; page is 0-based and never negative (a nonsense page reads as 0,
+ * which pages from the start rather than erroring mid-conversation).
+ */
+export function tablePageArgs(args: { limit?: unknown; page?: unknown } | undefined): TablePage {
+  const rawLimit = Math.floor(Number(args?.limit));
+  const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, MAX_TABLE_LIMIT) : DEFAULT_TABLE_LIMIT;
+  const rawPage = Math.floor(Number(args?.page));
+  const page = Number.isFinite(rawPage) && rawPage > 0 ? rawPage : 0;
+  return { page, limit, offset: page * limit };
+}
+
 // --- automatic row limits -------------------------------------------------------------------------
 
 /** Default rows returned when a SELECT arrives without a LIMIT of its own. */
@@ -79,11 +128,18 @@ function maskLiterals(sql: string): string {
   while (i < sql.length) {
     const c = sql[i];
     if (c === "'" || c === '"' || c === "`") {
+      // STANDARD-SQL masking only: the sole in-literal escape is the doubled quote. There is
+      // deliberately NO backslash-escape branch. MySQL treats \' as an escaped quote, but
+      // Postgres (standard_conforming_strings=on, the default for 15 years) treats the backslash
+      // as an ordinary character — and under MySQL semantics, `SELECT 'a\'; DROP TABLE t; --'`
+      // masks the entire tail as one string literal, hiding a real second statement from
+      // isReadOnlySql. Masking by the stricter dialect can only ever OVER-reject a MySQL query
+      // that stacks something after a \' literal (withRowLimit then declines to append LIMIT);
+      // the opposite choice executes hidden writes on Postgres.
       const quote = c;
       out += " ";
       i++;
       while (i < sql.length) {
-        if (sql[i] === "\\" && quote !== "`") { out += "  "; i += 2; continue; }
         if (sql[i] === quote) {
           if (sql[i + 1] === quote) { out += "  "; i += 2; continue; } // doubled = escaped quote
           out += " ";

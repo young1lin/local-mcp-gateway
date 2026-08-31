@@ -4,11 +4,12 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { ProcAdapter, tokenizeCommand, decodeChildOutput } from "../src/adapters/proc.js";
+import { ProcAdapter, tokenizeCommand, decodeChildOutput, PROC_CALL_TIMEOUT_MS } from "../src/adapters/proc.js";
 import { clearCalls, readCalls, setCallLogDir } from "../src/calls.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fixture = join(here, "fixtures", "stdio-echo.mjs");
+const slowFixture = join(here, "fixtures", "stdio-slow.mjs");
 
 describe("tokenizeCommand", () => {
   it("splits and honors quotes", () => {
@@ -101,5 +102,38 @@ describe("ProcAdapter close after the child is already gone", () => {
 
     await adapter.close(); // must not taskkill /T /F whatever now holds that number
     expect(adapter.pids()).toEqual([]);
+  });
+});
+
+describe("ProcAdapter call timeout", () => {
+  it("fails a tool call that outruns the configured timeout", async () => {
+    const adapter = new ProcAdapter({ command: `node "${slowFixture}"`, timeoutMs: 300 });
+    const proxyServer = await adapter.build();
+    const [c, s] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "t", version: "1" }, { capabilities: {} });
+    await Promise.all([client.connect(c), proxyServer.connect(s)]);
+
+    await expect(
+      client.callTool({ name: "slow", arguments: { ms: 5000 } } as never),
+    ).rejects.toThrow(/timed out/i);
+
+    await adapter.close();
+  }, 20000);
+
+  it("lets a call that finishes inside the timeout through untouched", async () => {
+    const adapter = new ProcAdapter({ command: `node "${slowFixture}"`, timeoutMs: 5000 });
+    const proxyServer = await adapter.build();
+    const [c, s] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "t", version: "1" }, { capabilities: {} });
+    await Promise.all([client.connect(c), proxyServer.connect(s)]);
+
+    const res = await client.callTool({ name: "slow", arguments: { ms: 200 } } as never);
+    expect((res.content as any[])[0].text).toBe("done after 200ms");
+
+    await adapter.close();
+  }, 20000);
+
+  it("defaults to a deadline longer than the SDK's 60s, which cut real inference calls short", () => {
+    expect(PROC_CALL_TIMEOUT_MS).toBeGreaterThan(60_000);
   });
 });

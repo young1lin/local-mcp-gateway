@@ -52,6 +52,10 @@ function num(v: unknown): number {
  * `mysql_query`.
  */
 export function mysqlResources(database: string, query: SqlQuery): ResourceProvider {
+  // `database` is interpolated into SHOW CREATE TABLE below (it cannot be a bound parameter there,
+  // like every identifier), so it passes the same gate `name` does. It comes from local config, not
+  // the network — this closes the one asymmetry with the fully-bound SQL around it.
+  assertIdent(database, "database name");
   const overviewUri = `mysql://${database}`;
   const tableUri = (name: string) => `${overviewUri}/${name}`;
 

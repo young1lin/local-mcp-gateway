@@ -408,7 +408,8 @@ describe("edits", () => {
     const m = manager();
     const c = store.addConnection(connDef);
     const r = store.addRule({ name: "pg", connectionId: c.id, localPort: await freePort(), targetHost: "127.0.0.1", targetPort: echoPort });
-    await expect(m.deleteConnection(c.id)).rejects.toThrow(/still used by: pg/);
+    // DependentsError now (structured, like rule deletion) — not the store's old flat string.
+    await expect(m.deleteConnection(c.id)).rejects.toMatchObject({ dependents: ["pg"] });
     await m.deleteRule(r.id);
     await expect(m.deleteConnection(c.id)).resolves.toBeUndefined();
     expect(store.isEmpty()).toBe(true);

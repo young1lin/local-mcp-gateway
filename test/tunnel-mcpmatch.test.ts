@@ -14,6 +14,9 @@ describe("mcpLoopbackPort", () => {
     expect(mcpLoopbackPort({ type: "pg", url: "postgresql://u:p@127.0.0.1:5433/db?sslmode=disable" })).toBe(5433);
     expect(mcpLoopbackPort({ type: "pg", url: "postgres://u@localhost/db" })).toBe(5432);
     expect(mcpLoopbackPort({ type: "pg", url: "postgresql://127.0.0.1:5432/db" })).toBe(5432);
+    // No path, only a query string: the authority used to swallow "5433?sslmode=require" as the host.
+    expect(mcpLoopbackPort({ type: "pg", url: "postgresql://u:p@127.0.0.1:5433?sslmode=require" })).toBe(5433);
+    expect(mcpLoopbackPort({ type: "pg", url: "postgresql://u:p@localhost?sslmode=require" })).toBe(5432);
   });
 
   it("is not fooled by a password containing an @ or a colon", () => {

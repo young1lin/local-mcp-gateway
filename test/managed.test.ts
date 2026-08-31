@@ -11,6 +11,7 @@ import {
   loadMcpGroups,
   DEFAULT_GROUP,
 } from "../src/managed.js";
+import { readSecureJson } from "../src/secure/statefile.js";
 
 let dir: string;
 let path: string;
@@ -28,7 +29,7 @@ describe("ManagedStore persistence", () => {
     const store = new ManagedStore(path);
     store.add({ name: "a", def: { type: "echo" }, enabled: true });
     expect(existsSync(`${path}.tmp`)).toBe(false);
-    expect(JSON.parse(readFileSync(path, "utf8")).mcps).toHaveLength(1);
+    expect(readSecureJson<{ mcps: unknown[] }>(path)!.mcps).toHaveLength(1);
   });
 
   it("reports a failed save instead of pretending it worked", () => {
@@ -60,13 +61,13 @@ describe("ManagedStore tool toggles", () => {
   it("persists and reloads disabledTools alongside mcps, for any MCP name", () => {
     const store = new ManagedStore(path);
     store.setDisabledTools("mysql", ["mysql_query"]);
-    store.setDisabledTools("redis-a-6379", ["redis_scan", "redis_get"]);
+    store.setDisabledTools("redis-a-6379", ["redis_scan", "redis_read"]);
     // round-trips through a fresh store
     const reloaded = new ManagedStore(path);
     expect(reloaded.disabledTools("mysql")).toEqual(["mysql_query"]);
-    expect(reloaded.disabledTools("redis-a-6379")).toEqual(["redis_scan", "redis_get"]);
+    expect(reloaded.disabledTools("redis-a-6379")).toEqual(["redis_scan", "redis_read"]);
     // the file holds both sections
-    expect(loadToolToggles(path)).toEqual({ mysql: ["mysql_query"], "redis-a-6379": ["redis_scan", "redis_get"] });
+    expect(loadToolToggles(path)).toEqual({ mysql: ["mysql_query"], "redis-a-6379": ["redis_scan", "redis_read"] });
   });
 
   it("answers [] for an unknown MCP, and drops the key when the list empties", () => {
@@ -123,7 +124,7 @@ describe("ManagedStore groups", () => {
     expect(store.groupOf("anything")).toBe(DEFAULT_GROUP);
     store.add({ name: "a", def: { type: "echo" }, enabled: true });
     // A file with no groups at all is exactly "everything is in default" — no migration needed.
-    const raw = JSON.parse(readFileSync(path, "utf8"));
+    const raw = readSecureJson<Record<string, unknown>>(path)!;
     expect(raw.groups).toBeUndefined();
     expect(raw.mcpGroups).toBeUndefined();
   });

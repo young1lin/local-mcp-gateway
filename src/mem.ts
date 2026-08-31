@@ -99,6 +99,10 @@ while ($q.Count -gt 0) {
   Get-CimInstance Win32_Process -Filter "ParentProcessId=$p" -EA SilentlyContinue | ForEach-Object { $q.Enqueue([int]$_.ProcessId) }
 }
 $pr = $all | ForEach-Object { Get-Process -Id $_ -EA SilentlyContinue } | Where-Object { $_ }
+# Roots sampled but ALL gone by walk time (children exiting) would print "|0" below — an
+# authoritative-looking 0 MB. Emit nothing instead: the walker already treats empty output as a
+# failed walk, and getMemoryInfo's contract is "report pending, never a confident zero".
+if (@($pr).Count -eq 0) { return }
 "{0}|{1}" -f (($pr | Measure-Object -Property WorkingSet64 -Sum).Sum), (@($pr).Count)
 `.trim();
 

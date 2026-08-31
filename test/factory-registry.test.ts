@@ -62,7 +62,8 @@ describe("external adapters", () => {
     expect(typeof server.setRequestHandler).toBe("function");
     expect(a.makeServer()).not.toBe(server); // delegated — the fixture builds a fresh one
 
-    await expect(a.ping()).rejects.toThrow(/boom/); // delegated to the inner ping
+    expect(typeof a.ping).toBe("function"); // present only because the inner adapter has one
+    await expect(a.ping!()).rejects.toThrow(/boom/); // delegated to the inner ping
     await a.close();
     expect(existsSync(marker)).toBe(true); // delegated to the inner close
   });

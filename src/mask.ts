@@ -13,6 +13,15 @@ const MASK = "••••••••";
 // passphrase is every bit as much a credential as a DB password.
 const SECRET_KEY_RE = /^(password|pass|passphrase|secret|token)$/i;
 const SECRET_ENV_RE = /(pass|secret|token|key|credential)/i;
+
+/** THE one substring wordlist for "does this KEY name carry a credential", shared by the persisted
+ *  call log (calls.ts) and the traffic ring (traffic.ts). It used to exist as two drifting copies:
+ *  the call log's lacked `authorization|api[_-]?key`, so an {"apiKey": "sk-…"} argument was
+ *  redacted in the traffic view yet written PLAINTEXT to logs/calls/<mcp>.jsonl — the copy that
+ *  persists and survives restarts. `key` alone is deliberately not a substring here (it would
+ *  over-redact names like tokenEnv); env VAR names keep their own broader regex above, because an
+ *  env var is named by someone who knows what it holds. */
+export const SECRET_ARG_KEY_RE = /(password|passwd|passphrase|secret|token|credential|authorization|api[_-]?key)/i;
 /** Header names whose value is a credential. `auth` is the one that matters: a remote MCP's API key
  *  travels in `Authorization`, exactly as a proc MCP's travels on its command line. Over-matching is
  *  harmless — a masked value the panel sends back is restored from what is stored. */

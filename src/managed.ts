@@ -1,8 +1,7 @@
-import { existsSync, readFileSync } from "node:fs";
 import type { ServerDef } from "./config.js";
-import { writeJsonAtomic } from "./atomic-json.js";
 import { log } from "./log.js";
 import { dataPath } from "./datadir.js";
+import { readSecureJson, writeSecureJson } from "./secure/statefile.js";
 
 /** A user-added MCP: its definition + whether it should auto-start. Persisted to managed.json. */
 export interface ManagedEntry {
@@ -15,14 +14,14 @@ export interface ManagedEntry {
 
 /** Read managed.json (returns [] when missing or invalid). */
 export function loadManaged(path = dataPath("managed.json")): ManagedEntry[] {
-  if (!existsSync(path)) return [];
   let raw: unknown;
   try {
-    raw = JSON.parse(readFileSync(path, "utf8"));
+    raw = readSecureJson(path);
   } catch (err) {
     log("warn", "managed load failed", { err: (err as Error).message, path });
     return [];
   }
+  if (raw === undefined) return [];
   const arr = Array.isArray(raw) ? raw : (raw as { mcps?: unknown[] })?.mcps ?? [];
   return arr
     .map((e: any): ManagedEntry | null => {
@@ -41,9 +40,9 @@ export function loadManaged(path = dataPath("managed.json")): ManagedEntry[] {
  * same file on load; absent in older files, which simply means "everything on".
  */
 export function loadToolToggles(path = dataPath("managed.json")): Record<string, string[]> {
-  if (!existsSync(path)) return {};
   try {
-    const raw = JSON.parse(readFileSync(path, "utf8")) as { disabledTools?: Record<string, unknown> };
+    const raw = readSecureJson<{ disabledTools?: Record<string, unknown> }>(path);
+    if (!raw) return {};
     const dt = raw.disabledTools ?? {};
     const out: Record<string, string[]> = {};
     for (const [k, v] of Object.entries(dt)) {
@@ -58,9 +57,9 @@ export function loadToolToggles(path = dataPath("managed.json")): Record<string,
 /** Per-MCP resources on/off, keyed by MCP name. A stored value is the explicit toggle; absent means
  *  "never toggled" (use the default, which is on). */
 export function loadResourceToggles(path = dataPath("managed.json")): Record<string, boolean> {
-  if (!existsSync(path)) return {};
   try {
-    const raw = JSON.parse(readFileSync(path, "utf8")) as { resourceToggles?: Record<string, unknown> };
+    const raw = readSecureJson<{ resourceToggles?: Record<string, unknown> }>(path);
+    if (!raw) return {};
     const out: Record<string, boolean> = {};
     for (const [k, v] of Object.entries(raw.resourceToggles ?? {})) {
       if (typeof v === "boolean") out[k] = v;
@@ -77,9 +76,9 @@ export function loadResourceToggles(path = dataPath("managed.json")): Record<str
  * load; only ever present once the operator has rotated from the panel.
  */
 export function loadManagedToken(path = dataPath("managed.json")): string | undefined {
-  if (!existsSync(path)) return undefined;
   try {
-    const raw = JSON.parse(readFileSync(path, "utf8")) as { token?: unknown };
+    const raw = readSecureJson<{ token?: unknown }>(path);
+    if (!raw) return undefined;
     return typeof raw.token === "string" && raw.token ? raw.token : undefined;
   } catch {
     return undefined;
@@ -91,9 +90,9 @@ export function loadManagedToken(path = dataPath("managed.json")): string | unde
  *  Names of MCPs that no longer exist are harmless: the reader only uses this to rank what IS
  *  registered. */
 export function loadOrder(path = dataPath("managed.json")): string[] {
-  if (!existsSync(path)) return [];
   try {
-    const raw = JSON.parse(readFileSync(path, "utf8")) as { order?: unknown };
+    const raw = readSecureJson<{ order?: unknown }>(path);
+    if (!raw) return [];
     return Array.isArray(raw.order) ? raw.order.filter((s): s is string => typeof s === "string") : [];
   } catch {
     return [];
@@ -120,9 +119,9 @@ function sameName(a: string, b: string): boolean {
  * implicit and always rendered first. Absent in older files, which simply means "no groups yet".
  */
 export function loadGroups(path = dataPath("managed.json")): string[] {
-  if (!existsSync(path)) return [];
   try {
-    const raw = JSON.parse(readFileSync(path, "utf8")) as { groups?: unknown };
+    const raw = readSecureJson<{ groups?: unknown }>(path);
+    if (!raw) return [];
     if (!Array.isArray(raw.groups)) return [];
     return raw.groups.filter((s): s is string => typeof s === "string" && s.trim() !== "");
   } catch {
@@ -138,9 +137,9 @@ export function loadGroups(path = dataPath("managed.json")): string[] {
  * user wants to organize.
  */
 export function loadMcpGroups(path = dataPath("managed.json")): Record<string, string> {
-  if (!existsSync(path)) return {};
   try {
-    const raw = JSON.parse(readFileSync(path, "utf8")) as { mcpGroups?: Record<string, unknown> };
+    const raw = readSecureJson<{ mcpGroups?: Record<string, unknown> }>(path);
+    if (!raw) return {};
     const out: Record<string, string> = {};
     for (const [k, v] of Object.entries(raw.mcpGroups ?? {})) {
       if (typeof v === "string" && v.trim() !== "") out[k] = v;
@@ -161,9 +160,9 @@ export interface TokenRec {
 
 /** The named-token set, persisted so created / rotated / revoked tokens survive a restart. */
 export function loadTokens(path = dataPath("managed.json")): TokenRec[] {
-  if (!existsSync(path)) return [];
   try {
-    const raw = JSON.parse(readFileSync(path, "utf8")) as { tokens?: unknown };
+    const raw = readSecureJson<{ tokens?: unknown }>(path);
+    if (!raw) return [];
     const arr = Array.isArray(raw.tokens) ? raw.tokens : [];
     return arr
       .map((t: any): TokenRec | null => {
@@ -394,7 +393,7 @@ export class ManagedStore {
    * definition never reached the disk.
    */
   private persist(): void {
-    writeJsonAtomic(this.path, {
+    writeSecureJson(this.path, {
       mcps: this.entries,
       disabledTools: this.toolToggles,
       resourceToggles: this.resourceToggles,

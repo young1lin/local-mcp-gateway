@@ -8,11 +8,11 @@ import type { ManagedStore } from "./managed.js";
 import type { TokenManager } from "./token.js";
 import { recordTraffic, recordBusEvent } from "./traffic.js";
 import { withCallClient, currentCallClient } from "./calls.js";
-import { makeAuthed, mountAdminApi, type AdminCreds } from "./adminapi.js";
+import { makeAuthed, mountAdminApi } from "./adminapi.js";
 import { mountTunnelApi } from "./tunnels/api.js";
 import type { TunnelManager } from "./tunnels/manager.js";
 import type { TunnelStore } from "./tunnels/store.js";
-import { adminHtml } from "./admin.js";
+import { adminAsset, adminHtml } from "./admin.js";
 import { remoteRequestReason } from "./local-only.js";
 import { Router, header, sendEmpty, sendJson, sendText, type Handler, type Req, type Res } from "./http.js";
 
@@ -64,7 +64,7 @@ function captureResponse(res: Res): () => string {
 /**
  * Build the gateway HTTP server. MCP endpoints are a catch-all single-segment route resolved
  * dynamically from the registry, so paths can be added/removed at runtime. If a managed store is
- * given, the token-gated management API is mounted under /api.
+ * given, the management API is mounted under /api (loopback-guarded, no panel login).
  *
  * Returns an unstarted http.Server: the caller calls listen(), and tests hand it to supertest.
  */
@@ -72,7 +72,6 @@ export function buildApp(
   registry: Registry,
   tokens: TokenManager,
   store?: ManagedStore,
-  creds: AdminCreds = { user: "admin", pass: "admin" },
   /** Name of the env var the token was seeded from. Safe to show in client configs. */
   tokenEnv = "MCP_GATEWAY_TOKEN",
   /** SSH tunnels. Optional: without it the gateway serves exactly what it did before. */
@@ -166,8 +165,16 @@ export function buildApp(
 
   // Management dashboard + health (localhost-only; MCP endpoints stay bearer-gated).
   r.get("/", (_req, res) => {
-    // no-store: always serve the latest HTML, so editing admin.html needs no gateway restart.
+    // no-store: always serve the latest shell, so editing the panel needs no gateway restart.
     sendText(res, 200, adminHtml(), "text/html; charset=utf-8", { "Cache-Control": "no-store" });
+  });
+
+  // The panel's assets (styles/js ES modules), served from the same tree with the same freshness
+  // rule. Registered before the /:path MCP catch-all so it cannot swallow them.
+  r.get("/admin/*", (req, res) => {
+    const asset = adminAsset(req.path);
+    if (!asset) return sendJson(res, 404, { error: "not found" });
+    sendText(res, 200, asset.body, asset.type, { "Cache-Control": "no-store" });
   });
 
   r.get("/health", (_req, res) => {
@@ -179,10 +186,10 @@ export function buildApp(
     sendJson(res, 200, { ok: true });
   });
 
-  if (store) mountAdminApi(r, registry, store, creds, tokens, tokenEnv, tunnels?.manager);
+  if (store) mountAdminApi(r, registry, store, tokens, tokenEnv, tunnels?.manager);
   // Registered before the /:path MCP catch-all, which would otherwise swallow /api/tunnels.
   if (tunnels) {
-    mountTunnelApi(r, tunnels.store, tunnels.manager, makeAuthed(creds, tokens), registry);
+    mountTunnelApi(r, tunnels.store, tunnels.manager, makeAuthed(), registry);
   }
 
   // DELETE: session teardown. Stateless → nothing to tear down; acknowledge so the client closes cleanly.

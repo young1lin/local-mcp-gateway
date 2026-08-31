@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { daemonStatus, persistListenPort, startDaemon, stopDaemon, waitForHealth } from "../src/daemon.js";
+import { readSecureJson } from "../src/secure/statefile.js";
 import { listDaemonPorts, pidAlive, readPidFile, writePidFile } from "../src/pidfile.js";
 
 /**
@@ -15,9 +16,10 @@ const STUB = `
 import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-const cfg = JSON.parse(readFileSync(join(process.env.MCP_GATEWAY_HOME, "gateway.config.json"), "utf8"));
+const port = Number(process.env.MCP_GATEWAY_PORT) ||
+  JSON.parse(readFileSync(join(process.env.MCP_GATEWAY_HOME, "stub-port.json"), "utf8")).port;
 const ignore = process.env.STUB_IGNORE_SHUTDOWN === "1";
-console.log("stub starting on", cfg.port);
+console.log("stub starting on", port);
 const server = createServer((req, res) => {
   if (req.url === "/health") {
     res.writeHead(200, { "content-type": "application/json" });
@@ -43,7 +45,7 @@ const server = createServer((req, res) => {
   res.writeHead(404);
   res.end();
 });
-server.listen(cfg.port, "127.0.0.1");
+server.listen(port, "127.0.0.1");
 `;
 
 /** An entry that dies at once — what a bad config or a missing module looks like to start(). */
@@ -60,7 +62,10 @@ function pickPort(): number {
 }
 
 function writeConfig(port: number): void {
+  // Plaintext on purpose: the daemon adopts (and seals) hand-authored plaintext state on read.
   writeFileSync(join(home, "gateway.config.json"), JSON.stringify({ port, host: "127.0.0.1", tokenEnv: "MCP_GATEWAY_TOKEN", servers: {} }));
+  // The stub cannot import the gateway's decrypting reader, so it takes its port from here.
+  writeFileSync(join(home, "stub-port.json"), JSON.stringify({ port }));
 }
 
 beforeEach(() => {
@@ -156,7 +161,7 @@ describe("startDaemon", () => {
   it("persistListenPort rewrites only the port field of an existing config", () => {
     writeConfig(19999);
     persistListenPort(18000);
-    const cfg = JSON.parse(readFileSync(join(home, "gateway.config.json"), "utf8")) as { port: number; host: string };
+    const cfg = readSecureJson<{ port: number; host: string }>(join(home, "gateway.config.json"))!;
     expect(cfg.port).toBe(18000);
     expect(cfg.host).toBe("127.0.0.1");
   });
@@ -170,7 +175,7 @@ describe("startDaemon", () => {
     if (r.status !== "started") return;
     started.push(newPort);
     expect(r.port).toBe(newPort);
-    const cfg = JSON.parse(readFileSync(join(home, "gateway.config.json"), "utf8")) as { port: number };
+    const cfg = readSecureJson<{ port: number }>(join(home, "gateway.config.json"))!;
     expect(cfg.port).toBe(newPort);
     const res = await fetch(`http://127.0.0.1:${newPort}/health`);
     expect(res.status).toBe(200);

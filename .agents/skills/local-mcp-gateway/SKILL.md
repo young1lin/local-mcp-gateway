@@ -9,7 +9,8 @@ disable-model-invocation: true
 One localhost Node process hosting MCP servers on `http://127.0.0.1:19999/<name>`.
 State: `~/.mcp-gateway/` (`MCP_GATEWAY_HOME` to override).
 
-Do not cat `.env` — it holds database passwords. For login, run `lmg creds`.
+Do not cat `.env` — it holds database passwords. For the client token, run `lmg token` (or `lmg creds`
+for url + token). The panel itself has no login — loopback only.
 
 ## Gateway
 
@@ -22,7 +23,7 @@ lmg logs            # -f to follow
 lmg stop
 lmg open            # panel in a browser
 lmg token           # bearer token only (one line, for scripts)
-lmg creds           # panel url + user + password + token — tell the user these
+lmg creds           # panel url + client token — tell the user these
 lmg skill install   # copy this skill to ~/.agents, ~/.claude, ~/.cursor skills dirs
 ```
 
@@ -30,7 +31,8 @@ On Windows, `lmg status` first — the port refuses a duplicate. `lmg -p <port> 
 
 ## Admin API
 
-Base `http://127.0.0.1:19999`. Header: `Authorization: Bearer <token>` from `lmg token`.
+Base `http://127.0.0.1:19999`, loopback only (that is the whole gate). MCP endpoints still need
+`Authorization: Bearer <token>` from `lmg token`; the `/api` routes need no header.
 
 | Action | Method + path | Body |
 | --- | --- | --- |

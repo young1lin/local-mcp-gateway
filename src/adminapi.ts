@@ -1,37 +1,68 @@
-import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { readdirSync, statSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import type { Registry, RegistryEntry } from "./registry.js";
 import type { ManagedStore } from "./managed.js";
-import { DEFAULT_PORT, type ServerDef } from "./config.js";
+import { DEFAULT_PORT, removeConfigServer, type ServerDef } from "./config.js";
 import { maskDef, unmaskBody } from "./mask.js";
 import type { ListKind } from "./paging.js";
 import { makeAdapter } from "./adapters/factory.js";
 import { assertProxyUrl, proxiedFetch } from "./adapters/proxy-fetch.js";
 import { openSession } from "./introspect.js";
 import { listPage, newPageCache, PAGE_SIZE } from "./paging.js";
-import { verifyBasic, bearerSecret } from "./auth.js";
 import type { TokenManager } from "./token.js";
 import { log } from "./log.js";
 import { getMemoryInfo } from "./mem.js";
-import { clearCalls, contentText, readCall, readCalls, withCallSource } from "./calls.js";
+import { clearCalls, contentText, readCall, readCalls, readToolHistory, withCallSource } from "./calls.js";
 import { readTraffic, readTrafficEntry, trafficClients, clearTraffic } from "./traffic.js";
 import { dataPath } from "./datadir.js";
+import { readSecureJson } from "./secure/statefile.js";
 import { planMcpImport } from "./mcp-import.js";
-import { header, sendJson, type Handler, type Req, type Res, type Router } from "./http.js";
+import { mountDbBrowseApi } from "./dbbrowser-api.js";
+import { sendJson, type Handler, type Router } from "./http.js";
 
 function configuredPort(): number {
   try {
-    const n = Number(JSON.parse(readFileSync(dataPath("gateway.config.json"), "utf8")).port);
+    const n = Number((readSecureJson<{ port?: unknown }>(dataPath("gateway.config.json")) ?? {}).port);
     if (Number.isInteger(n) && n >= 1 && n <= 65535) return n;
   } catch {
-    /* no config, or no port field */
+    /* no config, undecryptable, or no port field */
   }
   return DEFAULT_PORT;
 }
 
-/** Panel login credentials (default admin/admin). */
-export interface AdminCreds {
-  user: string;
-  pass: string;
+/**
+ * A change-detection stamp over the compiled panel tree (dist/admin): every file's relative path
+ * and mtime, walked recursively and hashed. Any edit to the shell, a stylesheet or one JS module
+ * flips it, which is what /api/info hands the panel so it can reload itself after a rebuild. A
+ * hash rather than a max-mtime so a deleted file counts too; sha1 because it is change detection,
+ * not security.
+ */
+function panelVersionStamp(): string {
+  const root = join(dirname(fileURLToPath(import.meta.url)), "admin");
+  const parts: string[] = [];
+  const walk = (dir: string, rel: string): void => {
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return; // missing tree — empty stamp, same as the old missing-file case
+    }
+    for (const e of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      const childRel = rel ? rel + "/" + e.name : e.name;
+      if (e.isDirectory()) walk(join(dir, e.name), childRel);
+      else {
+        try {
+          parts.push(childRel + ":" + statSync(join(dir, e.name)).mtimeMs);
+        } catch {
+          /* vanished mid-walk — the next poll re-stamps anyway */
+        }
+      }
+    }
+  };
+  walk(root, "");
+  return createHash("sha1").update(parts.join("|")).digest("hex");
 }
 
 /**
@@ -70,7 +101,7 @@ function isValidName(name: string): boolean {
   return NAME_RE.test(name) && !RESERVED.has(name.toLowerCase());
 }
 
-function stateOf(e: RegistryEntry): string {
+export function stateOf(e: RegistryEntry): string {
   return e.lifecycle === "started" ? e.status : e.lifecycle;
 }
 
@@ -184,30 +215,34 @@ function buildTypedDef(body: any): ServerDef {
 }
 
 /**
- * The gate every management route sits behind: panel credentials (Basic) or the bearer token.
- * Exported so the tunnel API is protected by exactly the same check rather than its own copy.
+ * The management API's gate: there is none. The panel has no login — the username/password check and
+ * the bearer-token alternative were removed, because the router's loopback guard ahead of every route
+ * is the real boundary: a request that did not come from this machine never reaches /api at all, and
+ * on this machine there is exactly one operator. (The MCP endpoints stay token-gated — that token is
+ * what AI clients authenticate with, and it is not a panel login.)
+ *
+ * Kept as a wrapper rather than deleted so every admin and tunnel route reads uniformly, and so a
+ * future gate has one obvious place to appear.
  */
-export function makeAuthed(creds: AdminCreds, tokens: TokenManager): (h: Handler) => Handler {
-  return (h: Handler): Handler => async (req: Req, res: Res) => {
-    const a = header(req, "authorization");
-    if (verifyBasic(a, creds.user, creds.pass) || !!tokens.verify(bearerSecret(a))) return h(req, res);
-    sendJson(res, 401, { error: "Unauthorized" });
-  };
+export function makeAuthed(): (h: Handler) => Handler {
+  return (h: Handler): Handler => h;
 }
 
-/** Mount the management API under /api. Auth is username/password (Basic) or the bearer token. */
+/** Mount the management API under /api. The loopback guard is the only gate. */
 export function mountAdminApi(
   r: Router,
   registry: Registry,
   store: ManagedStore,
-  creds: AdminCreds,
   tokens: TokenManager,
   tokenEnv = "MCP_GATEWAY_TOKEN",
   /** Read-only tunnel view: the MCP detail page shows which tunnels serve it, and renames/deletes
    *  keep the links in tunnels.json pointing at the right names. Never used to change a tunnel. */
   tunnels?: TunnelLinks,
 ): void {
-  const authed = makeAuthed(creds, tokens);
+  const authed = makeAuthed();
+
+  // The Data view's browsing/editing API — same loopback-guarded /api namespace as the rest.
+  mountDbBrowseApi(r, registry);
 
   async function addManaged(name: string, def: ServerDef, enabled: boolean, startNow = enabled): Promise<string | undefined> {
     const adapter = makeAdapter(def, name);
@@ -228,16 +263,13 @@ export function mountAdminApi(
     return registry.get(name)?.lifecycle;
   }
 
-  // Login check for the browser gate. Validates username/password (timing-safe via verifyBasic).
-  r.post("/api/login", (req, res) => {
-    const basic = "Basic " + Buffer.from(`${req.body?.username ?? ""}:${req.body?.password ?? ""}`).toString("base64");
-    if (verifyBasic(basic, creds.user, creds.pass)) return sendJson(res, 200, { ok: true, username: creds.user });
-    sendJson(res, 401, { error: "invalid credentials" });
-  });
 
-  // The env var the seed token came from — metadata for the panel, never a secret.
+  // The env var the seed token came from — metadata for the panel, never a secret. The panel
+  // stamp summarizes the whole admin/ tree (every file's name + mtime, hashed): the page polls it
+  // and reloads ITSELF when a new build lands — one edited module counts as much as the shell —
+  // so an update never costs the operator a manual refresh (or a stray new tab).
   r.get("/api/info", authed((_req, res) => {
-    sendJson(res, 200, { tokenEnv });
+    sendJson(res, 200, { tokenEnv, panelVersion: panelVersionStamp() });
   }));
 
   // --- tokens: named per-client bearers, so the logs can attribute every request to a client ----
@@ -508,9 +540,12 @@ export function mountAdminApi(
         return sendJson(res, 400, { error: (err as Error).message });
       }
       const headers = { accept: "application/json", ...((def.headers as Record<string, string>) ?? {}) };
-      const doFetch =
-        typeof def.proxy === "string" && def.proxy ? proxiedFetch(assertProxyUrl(def.proxy)) : fetch;
+      // assertProxyUrl throws SYNCHRONOUSLY on a malformed proxy — inside the try, where an invalid
+      // proxy reads like every other rest test failure ({ok:false}) instead of a 500. The http/DB
+      // branches already validated their adapter constructors inside their try blocks.
+      let doFetch: typeof fetch = fetch;
       try {
+        if (typeof def.proxy === "string" && def.proxy) doFetch = proxiedFetch(assertProxyUrl(def.proxy));
         const out = await doFetch(String(def.baseUrl), {
           method: "GET",
           headers,
@@ -531,7 +566,15 @@ export function mountAdminApi(
     }
     try {
       if (type === "http") {
-        await adapter.build(); // the initialize handshake IS the test
+        // The initialize handshake IS the test — but capped like every other branch: the SDK's own
+        // connect timeout is ~60s, and a dead remote must not hold the button that long.
+        await Promise.race([
+          adapter.build(),
+          new Promise<never>((_, reject) => {
+            const t = setTimeout(() => reject(new Error(`timed out after ${TEST_TIMEOUT_MS} ms`)), TEST_TIMEOUT_MS);
+            t.unref();
+          }),
+        ]);
         sendJson(res, 200, { ok: true, ms: Date.now() - t0 });
       } else {
         if (!adapter.ping) throw new Error("this adapter has no connection probe");
@@ -596,6 +639,12 @@ export function mountAdminApi(
   r.delete("/api/mcps/:name", authed(async (req, res) => {
     const name = req.params.name;
     try {
+      // A config-sourced MCP must leave gateway.config.json too, or the next start resurrects it.
+      // The write is atomic and touches only this key — ${ENV} refs elsewhere survive verbatim.
+      // (The panel used to hide Delete for config MCPs because deleting only the runtime entry was
+      // a lie; now it is a real removal, file included.)
+      const e = registry.get(name);
+      if (e?.source === "config") removeConfigServer(name);
       await registry.delete(name);
       store.remove(name);
       tunnels?.forgetMcp(name); // no MCP by that name any more, so no rule may claim to serve it
@@ -646,6 +695,29 @@ export function mountAdminApi(
     const call = await readCall(e.name, seq);
     if (!call) return sendJson(res, 404, { error: `no call #${seq} in the log for ${e.name}` });
     sendJson(res, 200, { name: e.name, call });
+  }));
+
+  // One tool's newest recorded runs — the Run tab's refill dropdown. Metadata plus a one-line args
+  // preview only; the complete arguments of a picked entry come from /calls/:seq, so however many
+  // entries are listed this stays light. "q", when set, narrows the list to runs whose FULL recorded
+  // arguments contain it — the dropdown's search box; the preview label clips at 96 chars, the match
+  // must not.
+  r.get("/api/mcps/:name/tool-history", authed(async (req, res) => {
+    const e = registry.get(req.params.name);
+    if (!e) return sendJson(res, 404, { error: `unknown MCP: ${req.params.name}` });
+    const tool = req.query.get("tool") ?? "";
+    if (!tool) return sendJson(res, 400, { error: "tool is required" });
+    const limit = Number(req.query.get("limit"));
+    const q = req.query.get("q") ?? undefined;
+    sendJson(res, 200, {
+      tool,
+      entries: await readToolHistory(
+        e.name,
+        tool,
+        Number.isFinite(limit) && limit > 0 ? limit : undefined,
+        q,
+      ),
+    });
   }));
 
   // Drop an MCP's call history (the panel's "Clear" button).
@@ -767,7 +839,7 @@ export function mountAdminApi(
     toggle.on = on;
     store.setResourceEnabled(name, on);
     e.resPage = undefined; // the cached list no longer matches
-    void registry.notifyResourcesChanged(name);
+    registry.notifyResourcesChanged(name).catch((err) => log("warn", "resources-changed notify failed", { err: (err as Error).message }));
     sendJson(res, 200, { enabled: on });
   }));
 
@@ -794,7 +866,9 @@ export function mountAdminApi(
     const disabled = [...set];
     store.setDisabledTools(name, disabled);
     e.toolPage = undefined; // the cached (filtered) list no longer matches
-    void registry.notifyToolsChanged(name); // fire-and-forget: the client re-lists when it arrives
+    // Fire-and-forget but CAUGHT: notify is async (the SDK call can throw on a half-open client),
+    // and a rejected promise dropped with `void` is an unhandledRejection — process-fatal on Node.
+    registry.notifyToolsChanged(name).catch((err) => log("warn", "tools-changed notify failed", { err: (err as Error).message }));
     sendJson(res, 200, { tool, enabled, disabledTools: disabled });
   }));
 

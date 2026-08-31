@@ -8,7 +8,7 @@ import { forceFree, portOwner, probePort } from "./port.js";
 import { suggestMcps } from "./mcpmatch.js";
 import { DependentsError, type TunnelManager } from "./manager.js";
 import type { ConnInput, RuleInput, TunnelStore } from "./store.js";
-import type { SshConnDef } from "./types.js";
+import type { GroupKind, SshConnDef } from "./types.js";
 
 /**
  * Secrets go out masked and come back restored, reusing the MCP panel's sentinel round-trip: the
@@ -23,11 +23,17 @@ function unmaskConn(body: Record<string, unknown>, current?: SshConnDef): Record
 }
 
 /** `?force=1` or a `{ force: true }` body — both spellings, so no caller has to guess. */
+/** "rules" | "connections" from a path segment, or null when the segment names neither. */
+function groupKind(seg: string): GroupKind | null {
+  return seg === "rules" || seg === "connections" ? seg : null;
+}
+
 function wantsForce(req: Req): boolean {
   return req.query.get("force") === "1" || req.body?.force === true;
 }
 
 function ruleInput(body: any): RuleInput {
+  const mcps = Array.isArray(body?.mcps) ? body.mcps.filter((m: unknown) => typeof m === "string" && m) : undefined;
   return {
     name: String(body?.name ?? ""),
     connectionId: String(body?.connectionId ?? ""),
@@ -37,7 +43,10 @@ function ruleInput(body: any): RuleInput {
     remark: typeof body?.remark === "string" ? body.remark : "",
     autoReconnect: body?.autoReconnect === true || body?.autoReconnect === "true",
     reconnectInterval: Number(body?.reconnectInterval ?? 10),
-    mcps: Array.isArray(body?.mcps) ? body.mcps.filter((m: unknown) => typeof m === "string" && m) : [],
+    // Present only when the caller sent a list: an omitted key means "keep the stored links"
+    // (RuleInput.mcps is optional for exactly this), an explicit [] clears them.
+    ...(mcps ? { mcps } : {}),
+    group: typeof body?.group === "string" ? body.group : undefined,
   };
 }
 
@@ -52,6 +61,7 @@ function connInput(body: Record<string, unknown>): ConnInput {
     passphrase: typeof body.passphrase === "string" ? body.passphrase : undefined,
     password: typeof body.password === "string" ? body.password : undefined,
     hostKey: typeof body.hostKey === "string" ? body.hostKey : undefined,
+    group: typeof body.group === "string" ? body.group : undefined,
   };
 }
 
@@ -148,8 +158,58 @@ export function mountTunnelApi(
     sendJson(res, 200, {
       connections: rows.connections,
       rules: rows.rules,
+      ruleGroups: store.groupsOf("rules"),
+      connGroups: store.groupsOf("connections"),
       mcps: registry ? registry.names() : [],
     });
+  }));
+
+  // --- groups and order ---------------------------------------------------------------------------
+
+  // The whole order of one or both lists at once: the panel drags a row, then sends the ids it now
+  // sees. Order is array order in tunnels.json — no separate rank field to keep in step.
+  r.put("/api/tunnels/order", authed((req, res) => {
+    try {
+      const body = req.body ?? {};
+      if (body.connections != null) store.reorder("connections", body.connections);
+      if (body.rules != null) store.reorder("rules", body.rules);
+      sendJson(res, 200, {
+        connections: store.connections().map((c) => c.id),
+        rules: store.rules().map((x) => x.id),
+      });
+    } catch (err) {
+      fail(res, err);
+    }
+  }));
+
+  r.put("/api/tunnels/groups/:kind", authed((req, res) => {
+    const kind = groupKind(req.params.kind);
+    if (!kind) return sendJson(res, 404, { error: "unknown list: " + req.params.kind });
+    try {
+      sendJson(res, 200, { groups: store.setGroups(kind, req.body?.groups) });
+    } catch (err) {
+      fail(res, err);
+    }
+  }));
+
+  r.post("/api/tunnels/groups/:kind/rename", authed((req, res) => {
+    const kind = groupKind(req.params.kind);
+    if (!kind) return sendJson(res, 404, { error: "unknown list: " + req.params.kind });
+    try {
+      sendJson(res, 200, store.renameGroup(kind, String(req.body?.from ?? ""), String(req.body?.to ?? "")));
+    } catch (err) {
+      fail(res, err);
+    }
+  }));
+
+  r.put("/api/tunnels/groups/:kind/:id", authed((req, res) => {
+    const kind = groupKind(req.params.kind);
+    if (!kind) return sendJson(res, 404, { error: "unknown list: " + req.params.kind });
+    try {
+      sendJson(res, 200, { group: store.setGroup(kind, req.params.id, req.body?.group) });
+    } catch (err) {
+      fail(res, err);
+    }
   }));
 
   // Private keys under ~/.ssh. A browser cannot hand a real path to the page, so Browse is served
@@ -197,15 +257,14 @@ export function mountTunnelApi(
   }));
 
   r.delete("/api/tunnels/connections/:id", authed(async (req, res) => {
-    if (!store.connection(req.params.id)) {
-      return sendJson(res, 404, { error: `unknown SSH connection: ${req.params.id}` });
-    }
     try {
       await manager.deleteConnection(req.params.id);
       sendJson(res, 200, { id: req.params.id, deleted: true });
     } catch (err) {
-      // "still used by: a, b" is a 409: the request was understood and refused for a stated reason.
-      sendJson(res, 409, { error: (err as Error).message });
+      // Same funnel as rule deletion: DependentsError → 409 + dependents + confirmRequired,
+      // "unknown …" → 404, anything else → 400. The old blanket 409 made a disk error and a
+      // "still used by" refusal indistinguishable to the panel.
+      fail(res, err);
     }
   }));
 

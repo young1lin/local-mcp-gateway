@@ -3,6 +3,8 @@ import { readFileSync, statSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import {
   daemonStatus,
+  exportState,
+  importState,
   isNpxCachePath,
   readCreds,
   readGatewayToken,
@@ -19,6 +21,7 @@ import {
   type StopResult,
 } from "./daemon.js";
 import { logFilePath } from "./pidfile.js";
+import { asListenPort } from "./port.js";
 import { installSkill } from "./skill-install.js";
 
 /**
@@ -29,15 +32,19 @@ import { installSkill } from "./skill-install.js";
  * server is reached as a subprocess (start) or over loopback HTTP (everything else).
  */
 
-const COMMANDS = ["start", "stop", "restart", "status", "logs", "token", "creds", "open", "skill"] as const;
+const COMMANDS = ["start", "stop", "restart", "status", "logs", "token", "creds", "open", "export", "import", "skill"] as const;
 
 export interface Parsed {
   cmd: string;
   /** Subcommand for `skill` — only `install` exists today. */
   skillSub?: string;
+  /** The positional file argument for 'import'. */
+  file?: string;
   port?: number;
   /** A --port that was given but is not a usable port. Refused before anything is acted on. */
   badPort: boolean;
+  /** A --lines that was given but is not a positive integer — same refusal as badPort. */
+  badLines: boolean;
   foreground: boolean;
   follow: boolean;
   force: boolean;
@@ -63,7 +70,11 @@ export interface Ops {
   logs(port: number, lines: number, follow: boolean, io: Io): Promise<void>;
   open(url: string): void;
   token(): string | undefined;
-  creds(): { url: string; user: string; pass: string; token?: string };
+  creds(): { url: string; token?: string };
+  /** Decrypt every state file into one bundle ('lmg export'). */
+  exportState(): unknown;
+  /** Re-seal a bundle onto this machine ('lmg import'); returns the restored file names. */
+  importState(bundle: unknown): string[];
   foreground(opts?: { port?: number }): Promise<void>;
   /** Copy the shipped skill into the user-level skill dirs; returns the paths written. */
   skillInstall(): string[];
@@ -79,8 +90,11 @@ usage: lmg <command> [options]
   status           whether it is running, its MCPs, and what it costs in memory
   logs             show what the background gateway has been printing
   token            print the token clients authenticate with
-  creds            print the panel url, user, password, and token (for asking an AI)
+  creds            print the panel url and the gateway token (for asking an AI)
   open             open the panel in a browser
+  export           dump every state file as plaintext JSON to stdout — the recovery /
+                   move-to-another-machine path; redirect to a file and protect it
+  import <file>    restore an export on THIS machine (every file re-sealed to this machine)
   skill install    copy the shipped AI skill to ~/.agents/skills, ~/.claude/skills, ~/.cursor/skills
 
 options
@@ -97,9 +111,9 @@ options
 `;
 
 function toPort(raw: string): number | undefined {
-  if (!/^\d+$/.test(raw)) return undefined;
-  const n = Number(raw);
-  return n > 0 && n <= 65535 ? n : undefined;
+  // asListenPort's exact semantics (trim first, then strict digits + range) so `--port " 8080"`
+  // behaves like MCP_GATEWAY_PORT=" 8080 " instead of being refused while the env var works.
+  return asListenPort(raw.trim());
 }
 
 /**
@@ -110,6 +124,7 @@ export function parseArgv(argv: string[]): Parsed {
   const p: Parsed = {
     cmd: "",
     badPort: false,
+    badLines: false,
     foreground: false,
     follow: false,
     force: false,
@@ -124,13 +139,22 @@ export function parseArgv(argv: string[]): Parsed {
     if (!arg.startsWith("-")) {
       if (!p.cmd) p.cmd = arg;
       else if (p.cmd === "skill" && !p.skillSub) p.skillSub = arg;
+      else if (!p.file) p.file = arg;
       continue;
     }
     // --key=value and "--key value" are the same thing.
     const eq = arg.indexOf("=");
     const flag = eq === -1 ? arg : arg.slice(0, eq);
     const inlineValue = eq === -1 ? undefined : arg.slice(eq + 1);
-    const value = () => inlineValue ?? argv[++i] ?? "";
+    // Consume the next argv as this flag's value — but never a following FLAG: `logs -n --json`
+    // used to eat --json as -n's value and silently drop it (Number("--json") is NaN, ignored).
+    const value = () => {
+      if (inlineValue !== undefined) return inlineValue;
+      const next = argv[i + 1];
+      if (next === undefined || next.startsWith("-")) return "";
+      i++;
+      return next;
+    };
 
     switch (flag) {
       case "-p":
@@ -142,8 +166,10 @@ export function parseArgv(argv: string[]): Parsed {
       }
       case "-n":
       case "--lines": {
-        const n = Number(value());
-        if (Number.isInteger(n) && n > 0) p.lines = n;
+        // Strict digits, like toPort: 0x10 and 1e2 are refusals, not 16 and 100.
+        const raw = value();
+        if (!/^\d+$/.test(raw) || Number(raw) <= 0) p.badLines = true;
+        else p.lines = Number(raw);
         break;
       }
       // One letter, two conventional meanings — each the expected one for its command.
@@ -245,6 +271,10 @@ export async function run(argv: string[], io: Io, ops: Ops): Promise<number> {
     io.err("--port takes a number between 1 and 65535");
     return 1;
   }
+  if (p.badLines) {
+    io.err("--lines takes a positive whole number of lines");
+    return 1;
+  }
   if (!p.cmd) {
     io.out(USAGE);
     return 1;
@@ -311,8 +341,7 @@ export async function run(argv: string[], io: Io, ops: Ops): Promise<number> {
     case "creds": {
       const c = ops.creds();
       io.out(row("url", c.url));
-      io.out(row("user", c.user));
-      io.out(row("pass", c.pass));
+      io.out(row("login", "(none — the panel is loopback-only)"));
       if (c.token) {
         io.out(row("token", c.token));
         return 0;
@@ -323,6 +352,32 @@ export async function run(argv: string[], io: Io, ops: Ops): Promise<number> {
     case "open":
       ops.open(urlFor(port));
       return 0;
+    case "export": {
+      io.err("warning: everything below is plaintext secrets — redirect to a file, protect it, delete it when done");
+      io.out(JSON.stringify(ops.exportState(), null, 2));
+      return 0;
+    }
+    case "import": {
+      if (!p.file) {
+        io.err("usage: lmg import <file written by lmg export>");
+        return 1;
+      }
+      let bundle: unknown;
+      try {
+        bundle = JSON.parse(readFileSync(p.file, "utf8"));
+      } catch (err) {
+        io.err("cannot read " + p.file + ": " + (err as Error).message);
+        return 1;
+      }
+      try {
+        const restored = ops.importState(bundle);
+        io.out("restored (sealed to this machine): " + (restored.join(", ") || "nothing"));
+        return 0;
+      } catch (err) {
+        io.err((err as Error).message);
+        return 1;
+      }
+    }
     case "skill": {
       if (p.skillSub !== "install") {
         io.err(p.skillSub ? `unknown skill subcommand: ${p.skillSub}` : "usage: lmg skill install");
@@ -401,8 +456,14 @@ async function tailLog(port: number, lines: number, follow: boolean, io: Io): Pr
     io.out(all.slice(Math.max(0, all.length - lines)).join("\n").trimEnd());
     offset = Buffer.byteLength(text, "utf8");
   } catch {
-    io.err(`no log yet at ${file}`);
-    return;
+    // No file yet. Without --follow that is the whole answer; WITH it, the common case is
+    // "lmg start just fired and the child has not written its first line" — wait for the file
+    // instead of quitting, or the follow promise is broken exactly when it is most wanted.
+    if (!follow) {
+      io.err(`no log yet at ${file}`);
+      return;
+    }
+    io.err(`waiting for ${file} …`);
   }
   while (follow) {
     await sleep(300);
@@ -454,6 +515,8 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     open: openInBrowser,
     token: readGatewayToken,
     creds: readCreds,
+    exportState,
+    importState,
     skillInstall: installSkill,
     async foreground(opts) {
       // Run the server in this process: no detach, output on this terminal. What a Scheduled Task or

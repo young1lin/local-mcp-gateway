@@ -7,7 +7,9 @@ import { TokenManager } from "../src/token.js";
 import { echoAdapter } from "../src/adapters/echo.js";
 import { makeAdapter } from "../src/adapters/factory.js";
 import type { ServerDef } from "../src/config.js";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync } from "node:fs";
+import { readSecureJson } from "../src/secure/statefile.js";
+import { createServer as makeTcpServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +20,13 @@ import { recordBusEvent, recordTraffic } from "../src/traffic.js";
 setCallLogDir(mkdtempSync(join(tmpdir(), "mcp-api-calls-")));
 
 const TOKEN = "admin-tok";
+// A proxy port that is free ON THIS MACHINE at suite start. Hardcoding 7890 worked only while
+// nothing listened there; a real local proxy (clash/mihomo) accepts the connection and forwards,
+// turning the adapter's expected fast failure into a multi-second hang that trips the 5s cap.
+const PROXY_PORT = await new Promise<number>((resolve) => {
+  const srv = makeTcpServer();
+  srv.listen(0, "127.0.0.1", () => { const p = (srv.address() as { port: number }).port; srv.close(() => resolve(p)); });
+});
 const here = dirname(fileURLToPath(import.meta.url));
 const fixture = join(here, "fixtures", "stdio-echo.mjs");
 let counter = 0;
@@ -40,29 +49,20 @@ function setup() {
 }
 
 describe("admin API", () => {
-  it("rejects every mutation without the bearer token", async () => {
+  // The panel has no login: the loopback guard ahead of every route is the boundary, so /api is
+  // served to any caller that got this far (i.e. this machine). The MCP endpoints stay token-gated.
+  it("serves reads and mutations without any credentials", async () => {
     const { app } = setup();
     const res = await request(app).get("/api/mcps");
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(200);
     const add = await request(app).post("/api/mcps").send({ name: "x", command: "node x" });
-    expect(add.status).toBe(401);
+    expect(add.status).toBe(201);
   });
 
-  it("logs in with admin/admin and accepts Basic auth on /api", async () => {
+  it("has no login route to answer — the credential check is gone, not bypassed", async () => {
     const { app } = setup();
     const login = await request(app).post("/api/login").send({ username: "admin", password: "admin" });
-    expect(login.status).toBe(200);
-    expect(login.body.ok).toBe(true);
-
-    const basic = "Basic " + Buffer.from("admin:admin").toString("base64");
-    const list = await request(app).get("/api/mcps").set("Authorization", basic);
-    expect(list.status).toBe(200);
-  });
-
-  it("rejects a wrong password at login", async () => {
-    const { app } = setup();
-    const login = await request(app).post("/api/login").send({ username: "admin", password: "nope" });
-    expect(login.status).toBe(401);
+    expect(login.status).toBe(404);
   });
 
   it("tags each MCP row with how it is launched", async () => {
@@ -144,11 +144,11 @@ describe("admin API", () => {
   it("stores and returns a per-MCP proxy on http and rest MCPs", async () => {
     const { app, auth } = setup();
     const add = await request(app).post("/api/mcps").set(auth).send({
-      name: "prox-http", type: "http", url: "https://example.invalid/mcp", proxy: "http://127.0.0.1:7890",
+      name: "prox-http", type: "http", url: "https://example.invalid/mcp", proxy: `http://127.0.0.1:${PROXY_PORT}`,
     });
     expect(add.status).toBe(201);
     const det = await request(app).get("/api/mcps/prox-http/details").set(auth);
-    expect(det.body.config.proxy).toBe("http://127.0.0.1:7890");
+    expect(det.body.config.proxy).toBe(`http://127.0.0.1:${PROXY_PORT}`);
 
     const addRest = await request(app).post("/api/mcps").set(auth).send({
       name: "prox-rest", type: "rest", baseUrl: "https://example.invalid",
@@ -163,7 +163,7 @@ describe("admin API", () => {
   it("rejects a proxy that is not an http(s) URL", async () => {
     const { app, auth } = setup();
     const badHttp = await request(app).post("/api/mcps").set(auth).send({
-      name: "bad-proxy", type: "http", url: "https://example.invalid/mcp", proxy: "127.0.0.1:7890",
+      name: "bad-proxy", type: "http", url: "https://example.invalid/mcp", proxy: `127.0.0.1:${PROXY_PORT}`,
     });
     expect(badHttp.status).toBe(400);
     expect(String(badHttp.body.error)).toMatch(/proxy/i);
@@ -233,8 +233,8 @@ describe("admin API", () => {
     expect(info.status).toBe(200);
     expect(info.body.tokenEnv).toBe("MCP_GATEWAY_TOKEN");
     expect(JSON.stringify(info.body)).not.toContain(TOKEN);
-    // and it is gated like everything else under /api
-    expect((await request(app).get("/api/info")).status).toBe(401);
+    // and it is open like everything else under /api — the loopback guard is the only gate
+    expect((await request(app).get("/api/info")).status).toBe(200);
   });
 
   it("lists, creates, revokes and rotates named tokens", async () => {
@@ -507,6 +507,40 @@ describe("admin API", () => {
     expect((await request(app).get("/api/mcps/cl/calls").set(auth)).body.calls).toEqual([]);
   });
 
+  // The Run tab's refill dropdown: one tool's newest runs, newest first, both sources included. The
+  // full arguments of a picked entry come back from the existing per-seq route — the history itself
+  // carries only a one-line preview, so 300 entries stay light.
+  it("serves one tool's recent runs for the Run tab dropdown", async () => {
+    const { app, auth } = setup();
+    await request(app).post("/api/mcps").set(auth).send({ name: "hist", command: `node "${fixture}"` });
+    await request(app).post("/api/mcps/hist/call").set(auth).send({ tool: "echo", arguments: { msg: "from-panel" } });
+    await request(app).post("/hist").set(auth).set("Accept", "application/json, text/event-stream")
+      .send({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "echo", arguments: { msg: "from-client" } } });
+
+    const hist = await request(app).get("/api/mcps/hist/tool-history?tool=echo&limit=1").set(auth);
+    expect(hist.status).toBe(200);
+    expect(hist.body.entries).toHaveLength(1); // limit honored: only the newest
+    expect(hist.body.entries[0].via).toBe("mcp");
+    expect(hist.body.entries[0].args).toContain("from-client");
+
+    // The dropdown's search box: q narrows the list to runs whose FULL arguments contain it.
+    const filtered = await request(app).get("/api/mcps/hist/tool-history?tool=echo&q=from-client").set(auth);
+    expect(filtered.status).toBe(200);
+    expect(filtered.body.entries).toHaveLength(1); // "from-panel" does not contain "from-client"
+    expect(filtered.body.entries[0].args).toContain("from-client");
+    const missed = await request(app).get("/api/mcps/hist/tool-history?tool=echo&q=no-such-text").set(auth);
+    expect(missed.status).toBe(200);
+    expect(missed.body.entries).toEqual([]);
+
+    // A picked entry's complete arguments, via the route the dropdown fetches on selection.
+    const seq = hist.body.entries[0].seq;
+    const one = await request(app).get(`/api/mcps/hist/calls/${seq}`).set(auth);
+    expect(JSON.parse(one.body.call.args)).toEqual({ msg: "from-client" });
+
+    expect((await request(app).get("/api/mcps/hist/tool-history").set(auth)).status).toBe(400); // tool required
+    expect((await request(app).get("/api/mcps/nope/tool-history?tool=x").set(auth)).status).toBe(404);
+  });
+
   it("edits a managed MCP config and restarts with the new config", async () => {
     const { app, auth } = setup();
     await request(app).post("/api/mcps").set(auth).send({ name: "ed", command: `node "${fixture}"`, env: { MY_ECHO_TAG: "v1" } });
@@ -728,11 +762,15 @@ describe("admin API", () => {
     expect(res.body.processCount).toBe(1);
   });
 
-  it("refuses to delete a config MCP", async () => {
+  // The old contract (refuse: deleting a config MCP left its file entry behind, so it resurrected)
+  // became a real delete: the endpoint removes the gateway.config.json entry too. With NO file
+  // present (this test's data dir has none), the runtime half still deletes cleanly.
+  it("deletes a config MCP even when no config file holds it (runtime-only removal)", async () => {
     const { app, auth, registry } = setup();
-    registry.register("cfg", "config", { type: "echo" }, { type: "echo", async build() { throw new Error("x"); } } as any);
+    registry.register("cfg", "config", { type: "echo" }, echoAdapter);
     const del = await request(app).delete("/api/mcps/cfg").set(auth);
-    expect(del.status).toBe(400);
+    expect(del.status).toBe(200);
+    expect(registry.get("cfg")).toBeUndefined();
   });
 });
 
@@ -747,7 +785,7 @@ describe("token secrets", () => {
     expect(got.body).toEqual({ id: made.body.id, label: "claude-code", secret: made.body.secret });
   });
 
-  it("keeps secrets out of the list, and off the unauthenticated path", async () => {
+  it("keeps secrets out of the list — reading one stays a separate, explicit request", async () => {
     const { app, auth } = setup();
     const made = await request(app).post("/api/tokens").set(auth).send({ label: "a" });
 
@@ -755,8 +793,9 @@ describe("token secrets", () => {
     const list = await request(app).get("/api/tokens").set(auth);
     expect(list.body.tokens[0].secret).toBeUndefined();
 
+    // No credential gate anymore — the loopback guard is the boundary for the secret route too.
     const anon = await request(app).get(`/api/tokens/${made.body.id}/secret`);
-    expect(anon.status).toBe(401);
+    expect(anon.status).toBe(200);
   });
 
   it("404s an unknown token id", async () => {
@@ -943,9 +982,47 @@ describe("POST /api/mcps/import", () => {
     expect(registry.has("docs")).toBe(true);
   });
 
-  it("rejects import without a token", async () => {
+  it("imports without credentials, like every other /api route", async () => {
     const { app } = setup();
     const res = await request(app).post("/api/mcps/import").send({ mcpServers: {} });
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(200);
+  });
+});
+
+describe("admin API > deleting a CONFIG-sourced MCP", () => {
+  // The delete must remove the server from gateway.config.json as well, or the next gateway start
+  // resurrects it — which is why the panel used to hide Delete for config MCPs. The file edit is
+  // surgical: only the named key goes, every other entry (and its ${ENV} refs) survives verbatim.
+  it("removes the entry from gateway.config.json and the runtime registry", async () => {
+    const home = mkdtempSync(join(tmpdir(), "mcp-cfg-del-"));
+    const prevHome = process.env.MCP_GATEWAY_HOME;
+    process.env.MCP_GATEWAY_HOME = home; // dataPath() reads this fresh on every call
+    try {
+      mkdirSync(join(home), { recursive: true });
+      writeFileSync(join(home, "gateway.config.json"), JSON.stringify({
+        port: 19999,
+        tokenEnv: "MCP_GATEWAY_TOKEN",
+        servers: {
+          doomed: { type: "echo" },
+          keeper: { type: "echo", password: "${KEEPER_PASS}" },
+        },
+      }, null, 2));
+      const { registry, app } = setup();
+      registry.register("doomed", "config", { type: "echo" }, echoAdapter);
+      registry.register("keeper", "config", { type: "echo" }, echoAdapter);
+
+      const res = await request(app).delete("/api/mcps/doomed");
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ name: "doomed", deleted: true });
+      expect(registry.get("doomed")).toBeUndefined();
+
+      const after = readSecureJson<{ servers: Record<string, unknown> }>(join(home, "gateway.config.json"))!;
+      expect(after.servers.doomed).toBeUndefined();
+      expect(after.servers.keeper).toEqual({ type: "echo", password: "${KEEPER_PASS}" }); // untouched, ref intact
+    } finally {
+      if (prevHome === undefined) delete process.env.MCP_GATEWAY_HOME;
+      else process.env.MCP_GATEWAY_HOME = prevHome;
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });

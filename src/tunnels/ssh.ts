@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import type { Duplex } from "node:stream";
 import { log } from "../log.js";
+import { resolveEnvRefs } from "../config.js";
 import { TunnelError, type ConnState, type FailureKind, type SshConnDef } from "./types.js";
 
 /**
@@ -43,6 +44,11 @@ export function classify(err: unknown): FailureKind {
   const level = e?.level ?? "";
   const message = String(e?.message ?? "");
   if (level === "client-authentication" || /All configured authentication methods failed/i.test(message)) return "auth";
+  // ssh2 throws these SYNCHRONOUSLY out of connect(), before any dial: an unparseable key or a
+  // wrong/missing passphrase is a credential problem. Left unclassified they fall through to
+  // "network", which isRetryable() happily loops forever — the exact hammering this taxonomy
+  // exists to stop.
+  if (/cannot parse (private ?key)|invalid private ?key|passphrase/i.test(message)) return "auth";
   if (/host (denied|key)/i.test(message)) return "hostkey";
   if (
     level === "client-timeout" ||
@@ -98,7 +104,7 @@ function readKey(def: SshConnDef): Buffer {
  * lib/client.js calls `verify(ret)` when the callback returns something), so a synchronous compare is
  * enough. Returning false makes ssh2 fail the handshake with "Host denied (verification failed)".
  */
-function connectConfig(def: SshConnDef, onFingerprint: (fp: string) => void, mismatch: { value?: string }): Record<string, unknown> {
+export function connectConfig(def: SshConnDef, onFingerprint: (fp: string) => void, mismatch: { value?: string }): Record<string, unknown> {
   const cfg: Record<string, unknown> = {
     host: def.host,
     port: def.port,
@@ -120,11 +126,16 @@ function connectConfig(def: SshConnDef, onFingerprint: (fp: string) => void, mis
       return false;
     },
   };
+  // `${ENV}` refs expand HERE, at connect time — the same build-time step the MCP adapters do
+  // with resolveDef. tunnels.json keeps the reference on disk (mask.ts already passes env refs
+  // through untouched), and only the live connection ever sees the secret; a literal password
+  // keeps working exactly as before. A ref whose env var is unset resolves to "" and fails as
+  // `auth` on the first try — visible, never retried.
   if (def.authType === "password") {
-    cfg.password = def.password ?? "";
+    cfg.password = resolveEnvRefs(def.password ?? "");
   } else {
     cfg.privateKey = readKey(def);
-    if (def.passphrase) cfg.passphrase = def.passphrase;
+    if (def.passphrase) cfg.passphrase = resolveEnvRefs(def.passphrase);
   }
   return cfg;
 }

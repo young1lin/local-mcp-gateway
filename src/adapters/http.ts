@@ -75,19 +75,12 @@ export class HttpAdapter implements Adapter {
     this.opts.name = name;
   }
 
-  /**
-   * Connected or not — and deliberately nothing more.
-   *
-   * The registry probes every started MCP on a 15s timer, which against a metered third-party
-   * endpoint would be thousands of requests a day that nobody asked for. MCP makes `ping` optional
-   * (either side MAY send one), so not sending it is within spec. Reachability is established once by
-   * the initialize handshake in build(); after that a real failure surfaces on a real call, where the
-   * traffic log already records it. The cost is a health dot that reads "up" for a remote that went
-   * down since the last call — the honest price of not generating traffic.
-   */
-  async ping(): Promise<void> {
-    if (!this.client) throw new Error("not started");
-  }
+  // Deliberately NO ping method. The registry reports an adapter without one as "unknown" — the
+  // honest reading for a metered third-party endpoint, and exactly what AGENTS.md requires of
+  // http/rest: probing every 15s would be thousands of unpaid requests a day. Reachability was
+  // proven once by the initialize handshake in build(); a real failure surfaces on a real call,
+  // where the traffic log records it. (An always-succeeding ping() used to live here and lit the
+  // dot green with a fake ~0ms latency — rest.ts never had one, so the two drifted.)
 
   async close(): Promise<void> {
     const client = this.client;

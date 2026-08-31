@@ -4,7 +4,7 @@ import type { Server } from "@modelcontextprotocol/server";
 import type { Adapter } from "./types.js";
 import { treeKill } from "../process-tree.js";
 import { noteProcPid, dropProcPid } from "../proc-pids.js";
-import { makeProxyServer } from "./proxy.js";
+import { makeProxyServer, type ProxyOpts } from "./proxy.js";
 import { loginPath } from "../pathenv.js";
 
 /** Cap on retained child stderr. Enough to diagnose a failed launch, small enough to ignore. */
@@ -14,6 +14,13 @@ const STDERR_MAX = 64 * 1024;
  *  can take tens of seconds — but finite, so a child that spawns yet never speaks MCP fails the start
  *  instead of wedging the MCP in "starting" forever. Override with PROC_HANDSHAKE_TIMEOUT_MS. */
 const HANDSHAKE_TIMEOUT_MS = Number(process.env.PROC_HANDSHAKE_TIMEOUT_MS) || 60_000;
+
+/** Deadline for one proxied tool call. The SDK's own default is 60s, which is under what a child
+ *  doing real work needs: vision/inference calls routinely run 20-50s and a large screenshot runs
+ *  past the minute, so that invisible default failed them after the model had already been billed
+ *  for the work. Finite, so a wedged child still fails the call instead of pinning the request
+ *  forever. Override globally with PROC_CALL_TIMEOUT_MS, or per-MCP with `"timeoutMs"` in config. */
+export const PROC_CALL_TIMEOUT_MS = Number(process.env.PROC_CALL_TIMEOUT_MS) || 180_000;
 
 export interface ProcOpts {
   /** Registry name of this MCP — the key its call log is filed under. */
@@ -30,6 +37,9 @@ export interface ProcOpts {
   exposeResources?: boolean;
   /** Expose the child's prompts (default true). */
   exposePrompts?: boolean;
+  /** Deadline for one tool call, in ms. Defaults to PROC_CALL_TIMEOUT_MS. Raise it for a child that
+   *  does slow work (image analysis, long scrapes); lower it for one that should always be quick. */
+  timeoutMs?: number;
 }
 
 /**
@@ -139,12 +149,7 @@ export class ProcAdapter implements Adapter {
     this.childPid = transport.pid ?? undefined; // remember for tree-kill on close()
     this.child = (transport as unknown as { _process?: { exitCode: number | null; signalCode: string | null } })._process;
     if (this.childPid) noteProcPid(this.childPid); // ledger it, so a future boot can reap this child if we die hard
-    this.server = makeProxyServer(this.client, {
-      name: this.opts.name,
-      exposeResources: this.opts.exposeResources,
-      exposePrompts: this.opts.exposePrompts,
-      description: this.opts.description,
-    });
+    this.server = makeProxyServer(this.client, this.proxyOpts());
     return this.server;
   }
 
@@ -168,12 +173,19 @@ export class ProcAdapter implements Adapter {
    *  client, which multiplexes concurrent requests by JSON-RPC id. */
   makeServer(): Server {
     if (!this.client) throw new Error("not started");
-    return makeProxyServer(this.client, {
+    return makeProxyServer(this.client, this.proxyOpts());
+  }
+
+  /** The proxy settings for this child, in one place: build() and makeServer() must agree, and a
+   *  field added to one copy but not the other silently changes behavior after the first request. */
+  private proxyOpts(): ProxyOpts {
+    return {
       name: this.opts.name,
       exposeResources: this.opts.exposeResources,
       exposePrompts: this.opts.exposePrompts,
       description: this.opts.description,
-    });
+      callTimeoutMs: this.opts.timeoutMs ?? PROC_CALL_TIMEOUT_MS,
+    };
   }
 
   logs(): string {

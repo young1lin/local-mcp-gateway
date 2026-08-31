@@ -107,19 +107,15 @@ describe("HttpAdapter proxies a remote streamable-HTTP MCP", () => {
   /**
    * Health probing must never generate traffic to a remote: the registry probes every started MCP on
    * a 15s timer, which against a metered third-party endpoint would be thousands of unrequested
-   * requests a day. So ping() reports whether this MCP is connected and nothing more — it stays
-   * resolved even once the remote is gone, and a real failure surfaces on a real call instead.
+   * requests a day. So the adapter declares NO ping at all — the registry then reports "unknown"
+   * (AGENTS.md's http/rest rule), and a real failure surfaces on a real call instead. An
+   * always-succeeding ping() here used to light the dot green with a fake ~0ms latency.
    */
-  it("pings without touching the network", async () => {
+  it("declares no ping — the registry reports unknown rather than probing a metered remote", async () => {
     const remote = await remoteEcho();
     const adapter = new HttpAdapter({ name: "r", url: remote.url, headers: { Authorization: `Bearer ${TOKEN}` } });
-    await expect(adapter.ping()).rejects.toThrow(/not started/);
-    try {
-      await adapter.build();
-      await remote.stop(); // the remote is now unreachable
-      await expect(adapter.ping()).resolves.toBeUndefined();
-    } finally {
-      await adapter.close();
-    }
+    expect((adapter as { ping?: unknown }).ping).toBeUndefined();
+    await remote.stop();
+    await adapter.close();
   });
 });

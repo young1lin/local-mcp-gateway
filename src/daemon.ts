@@ -2,6 +2,8 @@ import { spawn } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dataDir, dataPath } from "./datadir.js";
+import { readSecureJson, writeSecureJson } from "./secure/statefile.js";
+import { readEnvStore, writeEnvStore } from "./secure/envstore.js";
 import { logFilePath, pidAlive, readPidFile, removePidFile, writePidFile } from "./pidfile.js";
 import { treeKill } from "./process-tree.js";
 import { DEFAULT_PORT, asListenPort, envListenPort } from "./port.js";
@@ -89,23 +91,24 @@ export function resolvePort(): number {
 export function persistListenPort(port: number): void {
   const path = dataPath("gateway.config.json");
   if (!existsSync(path)) return;
-  let raw: Record<string, unknown>;
+  let raw: Record<string, unknown> | undefined;
   try {
-    const parsed = JSON.parse(readFileSync(path, "utf8"));
-    if (!parsed || typeof parsed !== "object") return;
-    raw = parsed as Record<string, unknown>;
+    raw = readSecureJson<Record<string, unknown>>(path);
   } catch {
-    return; // a broken file is not ours to rewrite
+    return; // a file this machine cannot decrypt is not ours to rewrite
   }
+  if (!raw || typeof raw !== "object") return;
   if (raw.port === port) return;
   raw.port = port;
-  writeFileSync(path, JSON.stringify(raw, null, 2) + "\n");
+  // Sealed + atomic like every other state write: a torn gateway.config.json is the one file this
+  // gateway cannot boot through (loadConfig has no catch), and this rewrite runs on every --port change.
+  writeSecureJson(path, raw);
 }
 
 function readConfigRaw(): Record<string, unknown> | undefined {
   try {
-    const parsed = JSON.parse(readFileSync(dataPath("gateway.config.json"), "utf8"));
-    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : undefined;
+    const parsed = readSecureJson<Record<string, unknown>>(dataPath("gateway.config.json"));
+    return parsed && typeof parsed === "object" ? parsed : undefined;
   } catch {
     return undefined;
   }
@@ -134,37 +137,88 @@ export function isNpxCachePath(path: string): boolean {
 function readEnvKey(key: string): string | undefined {
   if (process.env[key]) return process.env[key];
   try {
-    const re = new RegExp(`^\\s*(?:export\\s+)?${key}=(.*)$`);
-    for (const line of readFileSync(dataPath(".env"), "utf8").split(/\r?\n/)) {
-      const m = re.exec(line);
-      if (m) return m[1].trim();
-    }
+    return readEnvStore()[key]; // the sealed store; a legacy .env is folded in (and removed) here
   } catch {
-    /* no .env */
+    /* no store yet */
   }
   return undefined;
 }
 
 export function readGatewayToken(): string | undefined {
   try {
-    const m = JSON.parse(readFileSync(dataPath("managed.json"), "utf8"));
+    const m = readSecureJson<{ token?: unknown }>(dataPath("managed.json"));
     if (typeof m?.token === "string" && m.token) return m.token;
   } catch {
-    /* no managed.json yet */
+    /* no managed.json yet, or not decryptable here */
   }
   const name = typeof readConfigRaw()?.tokenEnv === "string" ? String(readConfigRaw()!.tokenEnv) : "MCP_GATEWAY_TOKEN";
   return readEnvKey(name);
 }
 
-/** Panel login + bearer token, for `lmg creds`. Never dumps the rest of .env (DB passwords live there). */
-export function readCreds(): { url: string; user: string; pass: string; token?: string } {
+/** Panel URL + bearer token, for `lmg creds`. Never dumps the rest of .env (DB passwords live
+ *  there). The panel itself has no login — the loopback guard is its boundary — so there is no
+ *  username or password to print. */
+export function readCreds(): { url: string; token?: string } {
   const token = readGatewayToken();
   return {
     url: urlFor(resolvePort()),
-    user: readEnvKey("GATEWAY_USER") || "admin",
-    pass: readEnvKey("GATEWAY_PASS") || "admin",
     ...(token ? { token } : {}),
   };
+}
+
+/** One decrypted bundle of every state file — what 'lmg export' writes and 'lmg import' reads. */
+export interface StateBundle {
+  version: 1;
+  exportedAt: string;
+  config?: unknown;
+  managed?: unknown;
+  tunnels?: unknown;
+  env?: Record<string, string>;
+}
+
+/**
+ * Decrypt every state file into one in-memory bundle. The ONLY plaintext export path, and it
+ * exists because machine binding cuts both ways: a copied data dir is useless on another machine
+ * BY DESIGN, so moving to a new machine (or recovering from a lost OS credential) needs an
+ * operator-initiated export on a machine that can still read the files.
+ */
+export function exportState(): StateBundle {
+  return {
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    config: readSecureJson(dataPath("gateway.config.json")),
+    managed: readSecureJson(dataPath("managed.json")),
+    tunnels: readSecureJson(dataPath("tunnels.json")),
+    env: readEnvStore(),
+  };
+}
+
+/** Restore a bundle: every section is re-sealed under THIS machine's key as it lands. */
+export function importState(bundle: unknown): string[] {
+  if (!bundle || typeof bundle !== "object") {
+    throw new Error("not a state bundle (expected JSON written by 'lmg export')");
+  }
+  const b = bundle as Partial<StateBundle>;
+  if (b.version !== 1) throw new Error("unsupported bundle version: " + String(b.version));
+  const restored: string[] = [];
+  if (b.config !== undefined) {
+    writeSecureJson(dataPath("gateway.config.json"), b.config);
+    restored.push("gateway.config.json");
+  }
+  if (b.managed !== undefined) {
+    writeSecureJson(dataPath("managed.json"), b.managed);
+    restored.push("managed.json");
+  }
+  if (b.tunnels !== undefined) {
+    writeSecureJson(dataPath("tunnels.json"), b.tunnels);
+    restored.push("tunnels.json");
+  }
+  if (b.env !== undefined && typeof b.env === "object") {
+    const merged = { ...readEnvStore(), ...(b.env as Record<string, string>) }; // imported values win
+    writeEnvStore(merged);
+    restored.push("env.json");
+  }
+  return restored;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -293,7 +347,15 @@ export async function startDaemon(opts: StartOptions = {}): Promise<StartResult>
   writePidFile({ pid: child.pid, port, entry, node, startedAt: new Date().toISOString() });
 
   if (await waitForHealth(port, timeoutMs, fetchFn, () => exited)) {
-    return { status: "started", pid: child.pid, port, url: urlFor(port) };
+    // Two racing `lmg start`s both reach here: the loser's child died on EADDRINUSE while the
+    // WINNER answered the health poll — the port being up proves nothing about whose child it is.
+    // Only our own child still standing counts as "started"; otherwise this is a failure with a
+    // pid file that must go (it points at the dead loser, not the daemon that serves the port).
+    if (!exited) {
+      return { status: "started", pid: child.pid, port, url: urlFor(port) };
+    }
+    removePidFile(port);
+    return { status: "failed", port, logTail: tailLog(log) };
   }
   // Never leave a pid file for something that never came up: the next start would report
   // already-running and the operator would have nothing to act on.

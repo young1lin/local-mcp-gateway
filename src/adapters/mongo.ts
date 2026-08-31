@@ -8,6 +8,30 @@ import {
   describeCollection, mongoResources, type CollectionInfo, type CollectionStat, type MongoLike,
 } from "./mongo-resources.js";
 import { humanBytes } from "./resources.js";
+import { BROWSE_DEFAULT_PAGE, BROWSE_MAX_PAGE, browseOffset, browsePageSize, type MongoBrowser, type MongoCollectionInfo } from "../dbbrowser.js";
+
+/**
+ * Render bson's int64 wrappers as exact decimal strings.
+ *
+ * The driver promotes int64 to a JS number only while it fits a double (promoteValues' default);
+ * anything wider — a snowflake id — comes back as a `Long` instance, and Long has NO toJSON, so
+ * JSON.stringify emits `{low, high, unsigned}` and the number is gone entirely (verified against
+ * bson 6.10.4). The exact-string trade is the one mysql's bigNumberStrings already makes. Long and
+ * Timestamp are the two 64-bit wrappers; every other bson class (ObjectId, Decimal128, Date,
+ * Double) has a toJSON and passes through untouched — as do class instances generally, so the walk
+ * only rebuilds plain objects and arrays.
+ */
+export function bsonPlain(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(bsonPlain);
+  if (!value || typeof value !== "object") return value;
+  const bsontype = (value as { _bsontype?: string })._bsontype;
+  if (bsontype === "Long" || bsontype === "Timestamp") return value.toString();
+  const proto = Object.getPrototypeOf(value);
+  if (proto !== Object.prototype && proto !== null) return value;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = bsonPlain(v);
+  return out;
+}
 
 const COLLECTION_ARG = {
   type: "string",
@@ -287,7 +311,7 @@ export class MongoAdapter extends DirectAdapter {
           .collection(collection)
           .find((args?.filter ?? {}) as Filter<Document>, options)
           .toArray();
-        const documents = dropNullColumns(rows);
+        const documents = dropNullColumns(bsonPlain(rows) as Document[]);
         if (requested == null && rows.length >= limit) {
           return { documents, note: `no limit requested, so a default limit of ${limit} was applied — there may be more documents.` };
         }
@@ -301,7 +325,7 @@ export class MongoAdapter extends DirectAdapter {
         if (this.readonly && writesViaAggregate(pipeline)) {
           throw new Error("refused: this mongo MCP is readonly and the pipeline writes ($out/$merge)");
         }
-        const rows = await db.collection(collection).aggregate(pipeline).toArray();
+        const rows = bsonPlain(await db.collection(collection).aggregate(pipeline).toArray()) as Document[];
         if (rows.length > MAX_ROW_LIMIT) {
           return { result: rows.slice(0, MAX_ROW_LIMIT), note: `result capped at ${MAX_ROW_LIMIT} rows — there may be more.` };
         }
@@ -353,6 +377,67 @@ export class MongoAdapter extends DirectAdapter {
       default:
         throw new Error(`unknown tool: ${tool}`);
     }
+  }
+
+  // --- admin panel Data view (mongo flavour) ------------------------------------------------------
+
+  /**
+   * The Data view's mongo browser: collections with sizes in the side list, and a paged
+   * find-with-JSON-filter document grid. Read-only by design — writes stay on the MCP's
+   * mongo_insert_many / update_many / delete_many tools, where the readonly flag governs them.
+   */
+  mongoBrowser(): MongoBrowser {
+    return {
+      readonly: this.readonly,
+      label: this.target,
+      listCollections: async (o) => {
+        const stats = await this.like().collections();
+        const grep = o.grep ? o.grep.toLowerCase() : "";
+        return stats
+          .filter((c) => !grep || c.name.toLowerCase().includes(grep))
+          .map((c): MongoCollectionInfo => ({
+            name: c.name,
+            type: c.type,
+            approxDocs: c.count,
+            size: humanBytes(c.bytes),
+          }))
+          .sort((a, b) => (a.name < b.name ? -1 : 1));
+      },
+      readCollection: async (o) => {
+        const collection = String(o.collection ?? "");
+        if (!collection) throw new Error("collection is required");
+        const filterText = String(o.filterJson ?? "{}").trim() || "{}";
+        let filter: Filter<Document>;
+        try {
+          filter = JSON.parse(filterText) as Filter<Document>;
+        } catch {
+          throw new Error("filter must be a valid JSON query document, e.g. {\"status\":\"active\"}");
+        }
+        if (!filter || typeof filter !== "object" || Array.isArray(filter)) {
+          throw new Error("filter must be a JSON object");
+        }
+        const db = await this.db();
+        const limit = Math.min(browsePageSize(o.limit, BROWSE_DEFAULT_PAGE), BROWSE_MAX_PAGE);
+        const offset = browseOffset(o.offset);
+        const [docs, total] = await Promise.all([
+          db.collection(collection)
+            .find(filter)
+            .sort({ _id: 1 })
+            .skip(offset)
+            .limit(limit)
+            .toArray() as Promise<Record<string, unknown>[]>,
+          db.collection(collection).countDocuments(filter),
+        ]);
+        // The page's column set: _id first, then every other field seen on the page, in first-seen order.
+        const fields: string[] = [];
+        for (const doc of docs) {
+          for (const k of Object.keys(doc)) {
+            if (k !== "_id" && !fields.includes(k)) fields.push(k);
+          }
+        }
+        return { collection, documents: bsonPlain(docs) as Record<string, unknown>[], total: Number(total), offset, limit, fields: ["_id", ...fields] };
+      },
+    };
   }
 
   async ping(): Promise<void> {

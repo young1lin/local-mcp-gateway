@@ -1,4 +1,5 @@
 import type { Server } from "@modelcontextprotocol/server";
+import type { DbBrowser, MongoBrowser, RedisBrowser } from "../dbbrowser.js";
 
 export interface Adapter {
   readonly type: string;
@@ -32,4 +33,11 @@ export interface Adapter {
   /** Root PIDs of any spawned subtree, so the memory view knows what to measure. Optional (proc only);
    *  an adapter that returns nothing has no child process, and measuring can be skipped entirely. */
   pids?(): number[];
+  /** The admin panel's Data view: a DBeaver-style table browser over this adapter's own
+   *  connection. Optional; implemented by the in-process SQL adapters (mysql, pg). */
+  dbBrowser?(): DbBrowser;
+  /** The Data view's redis flavour: SCAN-paged key list + type-aware reads. Optional (redis). */
+  redisBrowser?(): RedisBrowser;
+  /** The Data view's mongo flavour: collection list + find-with-filter document grid. Optional (mongo). */
+  mongoBrowser?(): MongoBrowser;
 }

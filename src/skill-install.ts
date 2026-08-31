@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { skillDir } from "./skilldir.js";
@@ -44,8 +44,20 @@ export function installSkill(home: string = homedir(), src: string = skillDir())
   ];
   for (const t of targets) {
     mkdirSync(dirname(t), { recursive: true });
-    rmSync(t, { recursive: true, force: true });
-    copyTree(src, t);
+    // Stage the whole copy BESIDE the target, then swap. The old order (rm, then copy) left the
+    // install deleted-but-not-replaced whenever copyTree hit this environment's documented EIO
+    // (see copyTree's comment) — a half install with no rollback. A failed stage leaves the
+    // previous install untouched; only a complete copy is swapped in.
+    const staged = `${t}.staged-${process.pid}`;
+    rmSync(staged, { recursive: true, force: true });
+    try {
+      copyTree(src, staged);
+      rmSync(t, { recursive: true, force: true });
+      renameSync(staged, t);
+    } catch (err) {
+      rmSync(staged, { recursive: true, force: true });
+      throw new Error(`could not install skill to ${t}: ${(err as Error).message}`);
+    }
   }
   return targets;
 }

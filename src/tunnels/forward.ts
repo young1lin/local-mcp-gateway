@@ -144,9 +144,11 @@ export class Forward {
     const closed = server
       ? new Promise<void>((resolve) => server.close(() => resolve()))
       : Promise.resolve();
+    // Just destroy: the 'close' listener accept() registered for every socket accumulates its
+    // final bytesRead/bytesWritten exactly once. The manual tally that used to live here ran FIRST
+    // and counted the same bytes again — stats() read roughly double during the waitForRelease
+    // window below (up to 2s), the one interval the numbers are actually watched in.
     for (const socket of [...this.sockets]) {
-      this.closedIn += socket.bytesRead;
-      this.closedOut += socket.bytesWritten;
       socket.destroy();
     }
     this.sockets.clear();

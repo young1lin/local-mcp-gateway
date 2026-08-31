@@ -1,7 +1,7 @@
-import { readFileSync } from "node:fs";
-import { config as loadDotenv } from "dotenv";
 import { isLoopbackBindHost } from "./local-only.js";
 import { dataPath } from "./datadir.js";
+import { readSecureJson, writeSecureJson } from "./secure/statefile.js";
+import { injectEnvStore } from "./secure/envstore.js";
 import { DEFAULT_PORT, envListenPort } from "./port.js";
 
 export { DEFAULT_PORT };
@@ -10,14 +10,40 @@ export interface ServerDef {
   type: string; // mysql | redis | pg | proc | echo
   [k: string]: unknown;
 }
+/**
+ * Remove one server entry from gateway.config.json — the file leg of the panel's Delete for a
+ * config-sourced MCP. Without it the runtime entry goes away but the next start resurrects the
+ * MCP from the file, which is why the panel used to hide Delete for them entirely.
+ *
+ * Only the named key is removed; the rest of the file is re-stringified from the parsed object, so
+ * every other entry keeps its `${ENV}` credential references verbatim. The write is atomic — a
+ * torn config is the one file this gateway cannot boot through. Returns false when neither the
+ * file nor the entry has it (nothing to remove; the caller proceeds with the runtime delete).
+ */
+export function removeConfigServer(name: string, path = dataPath("gateway.config.json")): boolean {
+  let raw: Record<string, unknown> | undefined;
+  try {
+    raw = readSecureJson<Record<string, unknown>>(path);
+    if (!raw) return false;
+    const servers = raw.servers;
+    if (!servers || typeof servers !== "object" || (servers as Record<string, unknown>)[name] === undefined) {
+      return false;
+    }
+  } catch {
+    return false; // missing or unreadable — nothing to edit
+  }
+  const servers = { ...(raw!.servers as Record<string, unknown>) };
+  delete servers[name];
+  writeSecureJson(path, { ...raw!, servers }); // sealed, like every state write
+  return true;
+}
+
 export interface GatewayConfig {
   port: number;
   host: string;
   token: string;
   /** Name of the env var the token came from. Safe to show — it is what client configs should read. */
   tokenEnv: string;
-  user: string;
-  pass: string;
   servers: Record<string, ServerDef>;
 }
 
@@ -51,6 +77,13 @@ function resolvePort(v: unknown): number {
 function resolveStr(value: string): string {
   return value.replace(/\$\{([A-Z0-9_]+)\}/g, (_m, name) => process.env[name] ?? "");
 }
+
+/** Expand `${ENV_VAR}` references in ONE string — the build-time step of the credential model,
+ *  shared with the tunnel connections (SSH password/passphrase) so tunnels.json can hold refs
+ *  exactly like gateway.config.json and managed.json do. */
+export function resolveEnvRefs(value: string): string {
+  return resolveStr(value);
+}
 function resolveValue(v: unknown): unknown {
   if (typeof v === "string") return resolveStr(v);
   if (Array.isArray(v)) return v.map(resolveValue);
@@ -81,12 +114,30 @@ export function resolveDef(def: ServerDef): ServerDef {
 }
 
 export function loadConfig(path = dataPath("gateway.config.json")): GatewayConfig {
-  // Load the data-dir .env (where bootstrap seeds the token), not a cwd-relative one.
-  loadDotenv({ path: dataPath(".env") });
-  const raw = JSON.parse(readFileSync(path, "utf8"));
+  // The sealed env store (where bootstrap seeds the token) replaces the old plaintext .env: its
+  // values land in process.env here, never overriding what the environment already set, so the
+  // `${ENV_VAR}` build-time expansion keeps resolving exactly as before.
+  injectEnvStore();
+  const raw = readSecureJson<Record<string, unknown>>(path);
+  if (raw === undefined) {
+    throw new Error(`${path}: no config file — run 'lmg start' once (it seeds one) or 'lmg import' a backup`);
+  }
+  // Structure gate before any field is read: a missing `servers` used to die as
+  // "Cannot convert undefined or null to object" and a SCALAR servers value booted a gateway with
+  // zero MCPs, silently healthy. Name the file's field, not the TypeError.
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error(`${path}: expected a JSON object at the top level`);
+  }
+  if (raw.servers === undefined) raw.servers = {};
+  if (!raw.servers || typeof raw.servers !== "object" || Array.isArray(raw.servers)) {
+    throw new Error(`${path}: "servers" must be an object of name -> definition`);
+  }
+  if (typeof raw.tokenEnv !== "string" || !raw.tokenEnv.trim()) {
+    throw new Error(`${path}: "tokenEnv" must name the env var holding the auth token`);
+  }
   // Omitted means loopback: there is exactly one sensible bind address for this gateway, and leaving it
   // undefined used to mean "every interface" — the opposite.
-  const host = raw.host === undefined ? "127.0.0.1" : raw.host;
+  const host = raw.host === undefined ? "127.0.0.1" : String(raw.host);
   // Refused at load, not warned about: a gateway holding live DB credentials and third-party API keys
   // has no business being offered to another machine, and `0.0.0.0` is how that happens by accident.
   if (!isLoopbackBindHost(host)) {
@@ -101,8 +152,5 @@ export function loadConfig(path = dataPath("gateway.config.json")): GatewayConfi
   for (const [name, def] of Object.entries(raw.servers)) {
     servers[name] = def as ServerDef; // kept unresolved on purpose — see resolveDef()
   }
-  // Panel login defaults to admin/admin; override via GATEWAY_USER / GATEWAY_PASS.
-  const user = process.env.GATEWAY_USER || "admin";
-  const pass = process.env.GATEWAY_PASS || "admin";
-  return { port: resolvePort(raw.port), host, token, tokenEnv: String(raw.tokenEnv), user, pass, servers };
+  return { port: resolvePort(raw.port), host, token, tokenEnv: String(raw.tokenEnv), servers };
 }

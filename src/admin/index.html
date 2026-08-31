@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>MCP Gateway</title>
+  <link rel="stylesheet" href="/admin/styles/base.css">
+  <link rel="stylesheet" href="/admin/styles/views.css">
+  <script>
+    /* Resolve the appearance before the first paint. Doing it in the main script instead means a
+       full-brightness white panel flashes past on the way into the dark one, which is exactly what
+       someone reaching for dark mode is trying to get away from. applyTheme() below repeats this;
+       this copy exists only to beat the paint. */
+    (function () {
+      var pref = "auto";
+      try { pref = localStorage.getItem("mcp_gateway_theme") || "auto"; } catch (e) { /* blocked */ }
+      var dark = pref === "dark" ||
+        (pref !== "light" && window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches);
+      document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+    })();
+  </script>
+<body>
+
+<div id="app">
+  <header class="toolbar">
+    <span class="brand">MCP Gateway</span>
+    <div class="seg" id="viewSeg" role="tablist" aria-label="Section">
+      <button role="tab" data-view="mcps" aria-selected="true">MCPs</button>
+      <button role="tab" data-view="traffic" aria-selected="false">Traffic</button>
+      <button role="tab" data-view="tunnels" aria-selected="false">Tunnels</button>
+      <button role="tab" data-view="data" aria-selected="false">Data</button>
+    </div>
+    <span class="chip" id="countChip"></span>
+    <span class="grow"></span>
+    <span class="chip" id="memChip" title="Gateway resident set">mem …</span>
+    <button class="btn icon" id="refreshBtn" title="Refresh (r)">&#8635;</button>
+    <button class="btn icon" id="themeBtn" title="Appearance" aria-label="Appearance">&#9681;</button>
+    <button class="btn" id="tokenBtn" title="View, copy or rotate the gateway token">Token</button>
+  </header>
+
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="side-head">
+        <input id="filter" type="search" placeholder="Search" aria-label="Filter MCPs">
+        <button class="btn icon" id="addBtn" title="New group" aria-label="New group">+</button>
+      </div>
+      <div class="side-cap" id="sideCap">MCPs</div>
+      <nav class="side-list" id="list" role="listbox" aria-label="Hosted MCPs"></nav>
+    </aside>
+    <main class="pane" id="pane"></main>
+  </div>
+</div>
+
+<div id="sheet" class="backdrop" hidden></div>
+<div id="toast" class="toast" hidden></div>
+
+<script type="module" src="/admin/js/main.js"></script>
+</body>
+</html>

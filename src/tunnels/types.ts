@@ -1,5 +1,8 @@
 export type AuthType = "key" | "password";
 
+/** Which list a group operation targets. */
+export type GroupKind = "rules" | "connections";
+
 /** One SSH server, shared by every forwarding rule that names it. */
 export interface SshConnDef {
   id: string;
@@ -8,6 +11,8 @@ export interface SshConnDef {
   port: number;
   username: string;
   authType: AuthType;
+  /** Panel-only grouping; absent means the implicit "default" group. */
+  group?: string;
   /** authType=key. May start with `~`, which is expanded at connect time. */
   keyPath?: string;
   /** authType=key, optional. */
@@ -34,6 +39,8 @@ export interface RuleDef {
   enabled: boolean;
   /** Names of MCPs this tunnel serves. Display and guard rail only — never automation. */
   mcps: string[];
+  /** Panel-only grouping; absent means the implicit "default" group. */
+  group?: string;
 }
 
 export type RuleState = "stopped" | "starting" | "up" | "reconnecting" | "error";
@@ -102,6 +109,7 @@ export interface ConnRow {
   port: number;
   username: string;
   authType: AuthType;
+  group?: string;
   state: ConnState;
   reason?: string;
   hostKey?: string;

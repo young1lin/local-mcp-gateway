@@ -29,7 +29,7 @@ TypeScript (strict), MIT-licensed, Node >= 22.19.0 (undici 8 sets that floor).
 
 ```bash
 npm install          # deps
-npm run build        # tsc -p tsconfig.build.json && copy admin.html into dist
+npm run build        # tsc -p tsconfig.build.json && copy the src/admin/ panel tree into dist
 npx lmg start        # detached daemon (same as `lmg start` / `npm start`)
 npm run dev          # tsx watch src/index.ts — hot reload while hacking
 npm run typecheck    # tsc --noEmit — strict mode, must pass
@@ -65,8 +65,18 @@ test/             vitest files, mirroring src/
   Put `test/<area>.test.ts` next to the module it covers.
 - **A new adapter** → `src/adapters/<name>.ts`, register it with `registerAdapterFactory` in
   `factory.ts` (the same door third-party modules take from config via
-  `"adapter": "<package or ./file.mjs>"`), add a field block to `src/admin.html`, and a
-  `test/<name>.test.ts`.
+  `"adapter": "<package or ./file.mjs>"`), add a field block to the panel's field-schema
+  module (`src/admin/js/fields.js`), and a `test/<name>.test.ts`.
+- **Form controls in the panel use the panel-wide styles, never per-view chrome.** The
+  element-level rules (`select { appearance: none; … chevron … }`, `input:focus { … }`, the
+  textarea/label styles) are the single source of control styling. A view may only add
+  sizing/layout overrides (`width`, `min-width`, `padding-top/bottom`) on top — never override
+  `background`, `border`, `appearance`, `box-shadow` or the focus ring of a `select`/`input`/
+  `textarea`. Every dropdown must look like every other dropdown in the panel. The Data view's
+  filter selects once shipped with their own borderless look and were reported as visually
+  inconsistent — that's the bug class this rule exists to prevent. The native option POPUP is
+  themed through `color-scheme` on `:root` (light/dark per theme) — never try to restyle
+  `<option>` elements themselves; keep `color-scheme` in sync with the theme instead.
 - **Don't reach for `any`** to make a type error go away — the project is strict
   on purpose.
 - **Never commit** `gateway.config.json`, `.env`, `managed.json`, `tunnels.json`

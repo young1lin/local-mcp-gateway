@@ -1,0 +1,410 @@
+    /* --- detail pane --------------------------------------------------------------------------- */
+    .pane { flex: 1; overflow-y: auto; padding: var(--s6) var(--s8) var(--s8); }
+    /* The measure. Every top-level block in the pane is capped, so one tool card reads as a card and
+       not as a stripe across a 2560px monitor. `.wide` is the opt-out for content whose rows are
+       genuinely wide (the call log, the traffic log, the tunnel table) — still capped, just further. */
+    /* Centred, not left-hugging. Capped at 820px against a 1263px pane, a left-aligned column leaves
+       ~400px of empty canvas stacked down one side — the content looks pushed against the sidebar
+       rather than laid out. System Settings centres its column for the same reason. */
+    .pane > * { max-width: var(--measure); margin-inline: auto; }
+    .pane > .wide { max-width: var(--measure-wide); }
+    .pane > .empty { max-width: none; }
+
+    .pane-head { display: flex; align-items: flex-start; gap: var(--s4); margin-bottom: var(--s5); }
+    .pane-title { font-size: var(--f-title); font-weight: 600; letter-spacing: -0.012em; margin: 0; }
+    .pane-desc { font-size: var(--f-head); font-weight: 400; color: var(--text-2); margin-top: 3px; max-width: 60ch; }
+    .pane-sub { display: flex; align-items: center; gap: var(--s2); font-size: var(--f-label); color: var(--text-2); margin-top: var(--s2); }
+    /* The mount path — the one part of the header you would actually copy, so it keeps the monospace
+       face the title gave up. */
+    .sub-path { font-family: var(--mono); font-size: var(--f-caption); color: var(--text-2); }
+    .sub-path::after { content: "·"; color: var(--text-3); margin-left: var(--s2); }
+    .pane-actions { margin-left: auto; display: flex; gap: var(--s2); position: relative; }
+
+    /* height:100% resolves against .pane when this is a direct child; min-height carries it when the
+       tunnel view nests it inside a .wide wrapper. */
+    .empty { height: 100%; min-height: 320px; display: grid; place-items: center; text-align: center; color: var(--text-3); }
+    .empty h2 { font-size: var(--f-head); font-weight: 550; color: var(--text-2); margin: 0 0 var(--s1); }
+
+    /* Segmented control. */
+    .seg { display: inline-flex; gap: 2px; padding: 2px; margin-bottom: var(--s4); background: var(--sep-soft); border-radius: 8px; }
+    .seg button { font-size: var(--f-body); font-weight: 500; color: var(--text-2); padding: 3px var(--s3); border-radius: 6px; }
+    .seg button[aria-selected="true"] { background: var(--card); color: var(--text); box-shadow: 0 .5px 1.5px rgba(0,0,0,.14), 0 0 0 .5px rgba(0,0,0,.04); }
+    /* A tab's item count. Glued straight onto the label ("Tools 1") it read as a typo; separated and
+       dimmed, it reads as a count. */
+    .seg-n { font-size: var(--f-caption); color: var(--text-3); font-variant-numeric: tabular-nums; margin-left: 5px; }
+    .seg button[aria-selected="true"] .seg-n { color: var(--text-2); }
+
+    /* Grouped inset list — hairlines, no drop shadow. */
+    .group { background: var(--card); border: 1px solid var(--sep); border-radius: var(--r-card); overflow: hidden; }
+    .group + .cap { margin-top: var(--s5); }
+    .cap { font-size: var(--f-caption); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--text-3); padding: 0 var(--s1) var(--s2); }
+    .row { display: flex; gap: var(--s3); padding: var(--s3) var(--s4); align-items: baseline; }
+    .row + .row { border-top: 1px solid var(--sep-soft); }
+    /* A selected client row in the Traffic summary — narrows the activity log below to it. */
+    .row.row-sel { background: color-mix(in srgb, var(--accent) 9%, transparent); }
+    .row .k { flex: none; width: 152px; color: var(--text-2); font-size: var(--f-label); }
+    .row .v { flex: 1; min-width: 0; font-family: var(--mono); font-size: var(--f-label); word-break: break-word; }
+    .row .v.wrap { white-space: pre-wrap; }
+    /* An empty-state or error sentence filling a group row. It is prose, so it is set in the sans
+       face — .v above is monospace because it holds a configured value. Every one of these used to
+       reuse .v, which is why "No calls yet…" read like a config dump. */
+    .rowmsg { flex: 1; min-width: 0; font-size: var(--f-body); color: var(--text-3); }
+    .rowmsg.warn { color: var(--text-2); }
+    .row-b { display: block; }
+    .row-act { display: flex; align-items: flex-start; gap: var(--s3); }
+    .row-act .row-main { flex: 1; min-width: 0; }
+    .row-b .name, .row-act .name { font-family: var(--mono); font-weight: 550; word-break: break-all; }
+    /* .row-act was missing from this rule, so a tool's description came out at full body size in full
+       body colour — the same weight as the monospace name above it. Nine rows of two equally loud
+       lines is why the list read as nine cards instead of nine rows. */
+    .row-b .desc, .row-act .desc { color: var(--text-2); font-size: var(--f-label); margin-top: 2px; }
+    /* A tool's argument names: one dimmed line under the description, truncated, never wrapped.
+       They were a wrapping row of filled chips, which cost every row about 30px and read as loud as
+       the name; then they were chips on the name's own line, which was worse — a tool with five
+       arguments stretched a monospace bar the full width of the card and buried the name at the
+       front of it. Neither earns a third weight in the row. The names are an annotation; Run holds
+       the real signature, with types, descriptions and required markers. */
+    .args {
+      font-family: var(--mono); font-size: var(--f-caption); color: var(--text-3); line-height: 1.3;
+      margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    /* Required ones by weight and contrast, not by hue: red here would compete with the error red on
+       a failed call two rows down, and "required" is not a failure. Run's red * is a form marker. */
+    .args b { font-weight: 600; color: var(--text-2); }
+    /* One-off label chip (the token list's "copies use this"). */
+    .tag { font-family: var(--mono); font-size: var(--f-caption); color: var(--text-3); background: var(--sep-soft); padding: 1px 6px; border-radius: 5px; }
+
+    .note { font-size: var(--f-label); color: var(--text-3); padding: var(--s3) var(--s1) 0; }
+    /* A failure reason comes from the far side and can be enormous — a rejected JSON-RPC handshake
+       arrives as a whole Zod error tree. Unbounded, it flooded the pane in red and buried the tab
+       body above it. Contained, tinted and scrolled: still complete, no longer the loudest thing on
+       the screen. */
+    .note.err {
+      color: var(--red); font-family: var(--mono); font-size: var(--f-caption);
+      background: color-mix(in srgb, var(--red) 7%, transparent);
+      border-radius: var(--r-row); padding: var(--s2) var(--s3); margin-top: var(--s3);
+      max-height: 8.5em; overflow: auto; word-break: break-word;
+    }
+    pre.logs { margin: 0; padding: var(--s3) var(--s4); font-family: var(--mono); font-size: var(--f-caption); line-height: 1.5; max-height: 260px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
+
+    .pager { display: flex; align-items: center; gap: var(--s3); padding: var(--s3) var(--s1) 0; font-size: var(--f-label); color: var(--text-2); }
+
+    /* --- call log (Logs tab) ------------------------------------------------------------------- */
+    /* center, not baseline: this header carries a segmented control and a button next to its caption,
+       and a segmented control has no baseline to share. */
+    .sec-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s3); padding: 0 var(--s1) var(--s2); }
+    .sec-cap { font-size: var(--f-caption); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--text-3); }
+    .call + .call { border-top: 1px solid var(--sep-soft); }
+    .call-sum { display: flex; align-items: center; gap: var(--s2); width: 100%; text-align: left; padding: var(--s2) var(--s4); cursor: pointer; }
+    .call-sum:hover { background: var(--hover); }
+    .call-tool { font-family: var(--mono); font-weight: 550; font-size: var(--f-label); white-space: nowrap; }
+    /* One line of the arguments in the summary — enough to recognize a query without opening it. */
+    .call-arg { flex: 1; min-width: 0; font-family: var(--mono); font-size: var(--f-caption); color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .call-meta { font-size: var(--f-caption); color: var(--text-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .call-body { display: none; padding: 0 var(--s4) var(--s3); }
+    .call.open .call-body { display: block; }
+    .call-lbl { font-size: var(--f-caption); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--text-3); padding: var(--s2) 0 var(--s1); }
+    /* Formatted JSON needs room before it starts scrolling — this is the view you read a result in. */
+    .call-body pre.logs { padding: var(--s2) var(--s3); background: var(--sep-soft); border-radius: 8px; max-height: 360px; }
+    #runOut:not(:empty) { max-height: 480px; margin-top: var(--s2); background: var(--sep-soft); border-radius: 8px; }
+    .call-body pre.logs.err { color: var(--red); }
+    .chev { color: var(--text-3); font-size: 13px; width: 9px; flex: none; transition: transform .15s ease; }
+    .call.open .chev { transform: rotate(90deg); }
+    @media (prefers-reduced-motion: reduce) { .chev { transition: none; } }
+
+    .form { padding: var(--s4); display: grid; gap: var(--s3); }
+    .form .two { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s3); }
+    .form-actions { display: flex; align-items: center; gap: var(--s3); padding-top: var(--s1); }
+    /* Result status beside the Run button — never styled before, so it inherited 13px body text and
+       sat at the same weight as the button's own label. */
+    .run-meta { font-size: var(--f-label); color: var(--text-3); font-variant-numeric: tabular-nums; }
+    /* The Run form's history control: a BUTTON in the actions row (an action — "refill the
+       arguments from a past run" — not a field of the form), opening a custom popover rather than a
+       native <select>. Native options fire no hover events and show `title` in only some browsers,
+       so "hover a long entry to read it in full" needs a drawn list. Left: the entries, one line
+       each. Right: the hovered entry in full — complete arguments, and the reply it produced.
+       The popover is position:fixed, appended to <body> at open time (see histOpen): as a descendant
+       of the form it was clipped by the .group card's overflow:hidden — half of it never rendered. */
+    .hist-wrap { flex: none; }
+    button.hist-sel {
+      font-size: var(--f-label); font-weight: 500; color: var(--text-2);
+      padding: 4px var(--s3); border: 0; border-radius: var(--r-btn);
+      background-color: var(--card); box-shadow: inset 0 0 0 1px var(--sep);
+      cursor: pointer; transition: background-color .12s ease; white-space: nowrap;
+    }
+    button.hist-sel:hover, button.hist-sel[aria-expanded="true"] { background-color: var(--hover); color: var(--text); }
+    button.hist-sel:focus { box-shadow: inset 0 0 0 1px var(--sep), 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+    .hist-pop {
+      position: fixed; z-index: 45; /* above the overflow menu (30) and sheet backdrop */
+      display: flex; width: min(780px, 92vw); max-height: 340px;
+      background: var(--card); border: 1px solid var(--sep); border-radius: var(--r-row);
+      box-shadow: var(--shadow-pop); overflow: hidden;
+    }
+    /* The left pane's column: the filter box rides pinned above the rows it narrows, so it never
+       scrolls away with them. Layout only — the input itself wears the panel-wide control styles. */
+    .hist-side { flex: none; width: 300px; display: flex; flex-direction: column; border-right: 1px solid var(--sep); }
+    .hist-search { flex: none; padding: var(--s1) var(--s1) 0; }
+    .hist-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: var(--s1); }
+    .hist-row {
+      display: block; width: 100%; text-align: left; border: 0; background: none; cursor: pointer;
+      font-family: var(--mono); font-size: var(--f-label); color: var(--text-2);
+      padding: 5px var(--s2); border-radius: 6px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .hist-row:hover, .hist-row:focus { background: var(--hover); color: var(--text); outline: none; }
+    .hist-view { flex: 1; min-width: 0; overflow-y: auto; padding: var(--s3); }
+    /* The same visual language as the Logs tab's expanded row and Run's output: uppercase section
+       labels, code on the sep-soft tint with rounded corners. The panes of one panel should not
+       invent a third way to show a request/reply pair. */
+    .hist-view pre.logs { margin: 0 0 var(--s3); padding: var(--s2) var(--s3); background: var(--sep-soft); border-radius: 8px; max-height: 176px; }
+    .hist-view .call-lbl { padding: 0 0 var(--s1); margin-bottom: 0; }
+    .hist-view .call-lbl + pre.logs { margin-top: 0; }
+    /* The run's identity line: the same status dot every list in the panel uses, then when/how/
+       duration in tabular numerals, separated from the content by a hairline. */
+    .hist-head {
+      display: flex; align-items: center; gap: var(--s2); flex: none;
+      padding-bottom: var(--s2); margin-bottom: var(--s2);
+      border-bottom: 1px solid var(--sep-soft);
+      font-size: var(--f-caption); color: var(--text-3); font-variant-numeric: tabular-nums;
+      white-space: nowrap; overflow: hidden;
+    }
+    .hist-head .dot { flex: none; }
+    .hist-head .grow { flex: 1; }
+    .hist-note { font-size: var(--f-caption); color: var(--text-3); padding-top: var(--s1); margin: calc(-1 * var(--s2)) 0 0; }
+    .hist-empty {
+      display: grid; place-items: center; height: 100%;
+      padding: var(--s4); font-size: var(--f-label); color: var(--text-3); text-align: center;
+    }
+
+    /* Overflow menu. */
+    .menu {
+      position: absolute; top: calc(100% + 6px); right: 0; z-index: 30; min-width: 236px;
+      background: var(--card); border: 1px solid var(--sep); border-radius: 10px;
+      box-shadow: var(--shadow-pop); padding: var(--s1); display: grid;
+    }
+    /* The pane's overflow menu anchors to .pane-actions; a menu opened from the sidebar has no such
+       anchor, so it is placed at the pointer instead. A floating menu also paints ABOVE a sheet:
+       dropdown.js appends its dropdowns to <body> as .menu.float.dd-menu, and a select inside a
+       sheet (the rule editor's SSH-connection picker among them) opens its list over the backdrop —
+       where no click can reach it, because the full-screen backdrop eats the hit and closes the
+       sheet. Stating the layer HERE is what makes it win: this rule outranks .menu above by
+       specificity, while a same-specificity .dd-menu in base.css loses the tie to views.css's
+       later .menu rule — base.css is linked first. */
+    .menu.float { position: fixed; top: auto; right: auto; min-width: 0; z-index: 45; }
+    .menu button { text-align: left; font-size: var(--f-body); padding: 5px var(--s2); border-radius: 6px; white-space: nowrap; }
+    .menu button:hover { background: var(--hover); }
+    .menu button.danger { color: var(--red); }
+    /* A tick column, so the group list reads as "which one is it in" rather than a list of actions. */
+    .menu button.pick { display: flex; align-items: center; gap: var(--s2); }
+    .menu button.pick::before { content: "\2713"; width: 10px; flex: none; color: var(--accent); visibility: hidden; }
+    .menu button.pick.on::before { visibility: visible; }
+    .menu hr { border: 0; border-top: 1px solid var(--sep-soft); margin: var(--s1) 0; }
+    /* A caption for the first group: "Copy Codex command" needs to say what it is for. */
+    .menu-cap {
+      font-size: var(--f-caption); font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
+      color: var(--text-3); padding: var(--s1) var(--s2) 2px;
+    }
+
+    /* Sheet (Add) + sign-in. */
+    .backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.28); display: grid; place-items: start center; padding-top: 8vh; z-index: 40; }
+    .sheet { width: min(560px, 92vw); background: var(--bg); border-radius: 14px; box-shadow: var(--shadow-sheet); overflow: hidden; }
+    .sheet-head { display: flex; align-items: center; padding: var(--s4); border-bottom: 1px solid var(--sep); }
+    .sheet-head h2 { font-size: var(--f-head); font-weight: 600; margin: 0; }
+    .sheet-body { padding: var(--s4); display: grid; gap: var(--s3); max-height: 66vh; overflow-y: auto; }
+    .sheet-foot { display: flex; justify-content: flex-end; gap: var(--s2); padding: var(--s3) var(--s4); border-top: 1px solid var(--sep); }
+    .hint { font-size: var(--f-label); color: var(--text-3); }
+
+    .toast {
+      position: fixed; bottom: var(--s5); left: 50%; transform: translateX(-50%);
+      background: var(--card); border: 1px solid var(--sep); border-radius: 10px;
+      box-shadow: var(--shadow-pop); padding: var(--s2) var(--s4);
+      font-size: var(--f-body); max-width: 78vw; z-index: 50;
+    }
+    .toast.err { border-color: var(--red); }
+    .spin { display: inline-block; width: 11px; height: 11px; border: 2px solid var(--text-3); border-top-color: transparent; border-radius: 50%; animation: spin .7s linear infinite; vertical-align: -1px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* --- tunnels ------------------------------------------------------------------------------- */
+    /* The list rows reuse .group/.dot/.btn; only the row layout is new. Deliberately not a table:
+       the MCP side already establishes inset grouped lists as this panel's list idiom. */
+    /* .seg's default bottom margin spaces it off the tab body. Where it sits inline beside other
+       controls instead — the toolbar, a section header — that margin shifts it off their centre. */
+    .toolbar .seg, .sec-head .seg { margin-bottom: 0; }
+    .tun-row { display: flex; align-items: center; gap: var(--s3); padding: var(--s3) var(--s4); }
+    .tun-row + .tun-row { border-top: 1px solid var(--sep-soft); }
+    .tun-row:hover { background: var(--hover); }
+    .tun-main { flex: 1; min-width: 0; }
+    .tun-name { font-size: var(--f-body); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tun-sub { font-size: var(--f-label); color: var(--text-2); font-family: var(--mono); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tun-sub .via { font-family: var(--sans); }
+    .tun-err { font-size: var(--f-label); color: var(--red); font-family: var(--mono); margin-top: 2px; }
+    .tun-acts { display: flex; gap: var(--s2); flex: none; }
+    .tun-foot { font-size: var(--f-label); color: var(--text-3); padding: var(--s3) var(--s1) 0; }
+    /* Grouped tunnel lists speak the pane's own section idiom — .sec-head caption over a .group
+       card, exactly like the Traffic view's sections — not the sidebar's tree headers. Only the
+       collapse behaviour, the section spacing and the drag affordances are new. */
+    .tun-group + .tun-group .tun-sec { margin-top: var(--s5); }
+    .tun-group.collapsed .group { display: none; }
+    .tun-sec { padding: 0 0 var(--s2); cursor: pointer; user-select: none; border-radius: 8px; }
+    .tun-sec-cap { display: flex; align-items: center; gap: var(--s2); min-width: 0; }
+    .tun-sec-cap .sec-cap { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    /* The chevron is a state indicator, not the only click target — the whole header toggles. */
+    .tun-chev { flex: none; display: grid; place-items: center; width: 18px; height: 18px; color: var(--text-3); font-size: 11px; transition: transform .15s ease; }
+    .tun-group:not(.collapsed) .tun-chev { transform: rotate(90deg); }
+    @media (prefers-reduced-motion: reduce) { .tun-chev { transition: none; } }
+    /* Dropping onto a section header appends to that group — the only way into an empty one. The
+       accent tint is the panel's existing "selected" fill, so a drop target reads as a target. */
+    .tun-sec.drop-into { background: color-mix(in srgb, var(--accent) 9%, transparent); border-radius: 8px; }
+    .tun-row[draggable="true"] { cursor: grab; }
+    .tun-row.dragging { opacity: 0.55; }
+    .tun-row.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
+    .tun-row.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
+    /* An MCP the tunnel serves, with the MCP's own health dot: a red MCP beside a green tunnel says
+       "the tunnel is fine, the database is not". */
+    .serves { display: inline-flex; align-items: center; gap: 4px; font-family: var(--sans); }
+    .serves .dot { width: 6px; height: 6px; }
+    .serves.unknown { color: var(--text-3); text-decoration: line-through; }
+    .keylist { display: grid; gap: 2px; max-height: 210px; overflow-y: auto; }
+    .keylist button { text-align: left; font-family: var(--mono); font-size: var(--f-label); padding: 4px var(--s2); border-radius: 6px; }
+    .keylist button:hover { background: var(--hover); }
+    .mcp-picks { display: grid; gap: var(--s1); max-height: 168px; overflow-y: auto; padding: var(--s2); background: var(--card); border: 1px solid var(--sep); border-radius: 8px; }
+    .with-btn { display: flex; gap: var(--s2); align-items: flex-end; }
+    .with-btn > label { flex: 1; }
+
+    /* --- data view (the DBeaver-style browser) --------------------------------------------------- */
+    .pane > .db-root { max-width: none; }
+    .db-root { display: flex; gap: var(--s4); height: 100%; min-height: 420px; }
+    .db-side { width: 250px; flex: none; display: flex; flex-direction: column; gap: var(--s2); min-height: 0; }
+    .db-tables { flex: 1; overflow-y: auto; background: var(--card); border: 1px solid var(--sep); border-radius: var(--r-card); padding: var(--s1); }
+    .db-table { display: block; width: 100%; text-align: left; padding: 6px var(--s2); border-radius: var(--r-row); background: none; border: none; font: inherit; color: var(--text); cursor: pointer; }
+    .db-table:hover { background: var(--hover); }
+    .db-table.sel { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+    .db-table.sel .db-table-name { color: var(--accent); font-weight: 590; }
+    .db-table-name { font-size: var(--f-body); }
+    .db-table-meta { font-size: var(--f-caption); color: var(--text-3); margin-top: 1px; }
+    .db-side-foot { display: flex; align-items: center; gap: var(--s2); font-size: var(--f-label); color: var(--text-2); justify-content: space-between; }
+    .db-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: var(--s2); min-height: 0; }
+    .db-head { display: flex; align-items: flex-end; gap: var(--s3); flex-wrap: wrap; }
+    .db-head-left { min-width: 0; }
+    .db-title { margin: 0; font-size: var(--f-head); }
+    .db-meta { font-size: var(--f-label); color: var(--text-2); margin-top: 2px; }
+    .db-head-ctl { margin-left: auto; display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; justify-content: flex-end; }
+    .db-filters { display: flex; flex-wrap: wrap; gap: var(--s1); align-items: center; }
+    .db-filter { display: inline-flex; gap: var(--s1); align-items: center; padding: 2px 0; }
+    /* Sizing only — the chrome (background, border, chevron, focus ring) is the panel's global
+       dropdown style, so every dropdown reads as one control family. Never restyle selects locally.
+       The .dd rules mirror the select ones: the custom trigger carries the select's classes. */
+    .db-filter select, .db-filter .dd { width: auto; min-width: 96px; padding-top: 2px; padding-bottom: 2px; }
+    .db-filter input { width: 150px; padding-top: 2px; padding-bottom: 2px; }
+    .db-filter .db-act { font-size: var(--f-body); }
+    .db-filter-add { font-size: var(--f-label); }
+    .db-filter-hint { font-size: var(--f-caption); color: var(--text-3); margin-left: var(--s2); }
+    .db-tabs { display: inline-flex; gap: 2px; padding: 2px; background: var(--sep-soft); border-radius: 8px; }
+    .db-tabs button { font-size: var(--f-body); font-weight: 500; color: var(--text-2); padding: 3px var(--s3); border-radius: 6px; background: none; border: none; cursor: pointer; }
+    .db-tabs button[aria-selected="true"] { background: var(--card); color: var(--text); box-shadow: 0 .5px 1.5px rgba(0,0,0,.14), 0 0 0 .5px rgba(0,0,0,.04); }
+    .db-detail-meta { font-size: var(--f-label); color: var(--text-2); padding: var(--s2) var(--s3); border-bottom: 1px solid var(--sep-soft); }
+    .db-ddl { margin: var(--s2); padding: var(--s3); background: var(--sep-soft); border-radius: var(--r-row); font-family: var(--mono); font-size: var(--f-label); white-space: pre-wrap; word-break: break-word; }
+    .db-keytype { font-size: var(--f-caption); padding: 1px 6px; border-radius: 980px; background: var(--sep-soft); color: var(--text-2); margin-left: var(--s2); }
+    .db-pagesize { width: auto; }
+    .db-console-row .dd { width: auto; min-width: 110px; }
+    /* The row-grid controls stay IN LAYOUT on every tab (visibility, not display): removing them
+       on the structure tabs let the right-aligned tab segment slide sideways on every switch. */
+    .db-data-ctl { display: inline-flex; align-items: center; gap: var(--s2); flex-wrap: wrap; justify-content: flex-end; }
+    .db-pageinfo { font-size: var(--f-label); color: var(--text-2); white-space: nowrap; }
+    /* SQL highlighting. The console is a transparent textarea over a highlighted <pre> (the
+       classic overlay): both wear .db-sql-face so every metric matches character-for-character. */
+    .db-sql-wrap { position: relative; height: 118px; background: var(--card); border: 1px solid var(--sep); border-radius: var(--r-row); transition: border-color .12s ease, box-shadow .12s ease; }
+    .db-sql-wrap:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+    .db-sql-face { font-family: var(--mono); font-size: var(--f-label); line-height: 1.55; padding: 6px var(--s2); white-space: pre-wrap; overflow-wrap: break-word; word-break: break-word; margin: 0; border: 0; tab-size: 2; }
+    #dbSql { position: absolute; inset: 0; width: 100%; height: 100%; background: transparent; color: transparent; caret-color: var(--accent); resize: none; outline: none; }
+    #dbSql::selection { background: color-mix(in srgb, var(--accent) 30%, transparent); }
+    .db-sql-hl { position: absolute; inset: 0; overflow: hidden; pointer-events: none; color: var(--text); }
+    .db-sql-hl .k { color: var(--accent); font-weight: 600; }
+    .db-sql-hl .f { color: var(--accent); font-weight: 400; }
+    .db-sql-hl .s { color: var(--green); }
+    .db-sql-hl .n { color: var(--amber); }
+    .db-sql-hl .c { color: var(--text-3); font-style: italic; }
+    .db-sql-hl .i { color: var(--text-2); }
+    .db-console { display: flex; flex-direction: column; gap: var(--s2); }
+    .db-console-row { display: flex; align-items: center; gap: var(--s2); }
+    .db-console-row .hint { color: var(--text-3); font-size: var(--f-label); }
+    #dbSql { min-height: 84px; }
+    .db-grid-wrap { flex: 1; overflow: auto; background: var(--card); border: 1px solid var(--sep); border-radius: var(--r-card); min-height: 200px; }
+    .db-grid { border-collapse: collapse; width: max-content; min-width: 100%; font-size: var(--f-label); }
+    .db-grid th, .db-grid td { border-bottom: 1px solid var(--sep-soft); border-right: 1px solid var(--sep-soft); padding: 4px var(--s2); white-space: nowrap; max-width: 340px; overflow: hidden; text-overflow: ellipsis; }
+    .db-grid thead th { position: sticky; top: 0; background: var(--card); z-index: 1; font-weight: 590; cursor: pointer; text-align: left; border-bottom: 1px solid var(--sep); }
+    .db-grid thead th:hover { background: var(--hover); }
+    /* The select-all corner is not clickable — the pointer should not promise it is. */
+    .db-grid thead th.db-rowctl { cursor: default; }
+    .db-rowctl { width: 58px; text-align: center; white-space: nowrap; }
+    .db-selbox { accent-color: var(--accent); width: auto; margin: 0 3px 0 0; vertical-align: middle; }
+    /* The header is a two-line stack: name line, then — when any column carries a comment — a
+       caption line with the field's meaning. Green rather than the sidebar meta line's grey: a
+       deliberate exception to "saturation is for state", chosen so the meaning reads at a glance
+       (the muted grey was reported as too quiet). Same --green token in both themes. */
+    .db-col-main { display: flex; align-items: center; min-width: 0; }
+    .db-col-name { overflow: hidden; text-overflow: ellipsis; }
+    .db-col-comment { font-size: var(--f-caption); font-weight: 450; color: var(--green); margin-top: 2px; max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
+    .db-key { color: var(--amber); margin-left: 4px; }
+    .db-col-type { color: var(--text-3); font-size: var(--f-caption); margin-left: 6px; font-family: var(--mono); }
+    /* The sorted column reads at a glance: a whisper of accent behind the whole header (mixed
+       OPAQUE over the card — a translucent sticky header would let scrolled rows bleed through)
+       and a hairline chevron, the same arrow the panel's dropdown triggers use. */
+    .db-grid thead th.db-sorted { background: color-mix(in srgb, var(--accent) 6%, var(--card)); }
+    .db-grid thead th.db-sorted:hover { background: color-mix(in srgb, var(--accent) 11%, var(--card)); }
+    .db-sort { flex: none; width: 7px; height: 7px; margin-left: 5px;
+      border-right: 1.5px solid var(--accent); border-bottom: 1.5px solid var(--accent);
+      transform: rotate(225deg); }
+    .db-sorted-desc .db-sort { transform: rotate(45deg); }
+    /* The column-header hover card: the panel's own chrome instead of the OS tooltip. */
+    .db-tip { position: fixed; z-index: 60; max-width: 340px; padding: 7px 10px 8px;
+      background: var(--card); border: 1px solid var(--sep); border-radius: var(--r-row);
+      box-shadow: var(--shadow-pop); font-size: var(--f-label); color: var(--text-2);
+      pointer-events: none; }
+    .db-tip .t-name { font-size: var(--f-body); font-weight: 590; color: var(--text); }
+    .db-tip .t-type { font-family: var(--mono); font-size: var(--f-caption); margin-top: 2px; }
+    .db-tip .t-comment { margin-top: 5px; padding-top: 5px; border-top: 1px solid var(--sep-soft);
+      color: var(--green); line-height: 1.45; white-space: normal; word-break: break-word; }
+    .db-tip .t-hint { margin-top: 5px; font-size: var(--f-caption); color: var(--text-3); }
+    .db-null { color: var(--text-3); font-style: italic; }
+    .db-cell { font-family: var(--mono); }
+    /* The Columns tab's Comment column joins the header caption's green, so "what this field
+       means" reads in one hue everywhere the panel shows it. The "—" placeholder stays un-tinted. */
+    .db-cell.db-det-comment { color: var(--green); }
+    .db-cell-edit { cursor: text; }
+    /* The inline editor is an absolutely-positioned overlay sized to the cell: it never changes
+       the cell's box, so opening/closing it cannot shift one pixel of the grid. */
+    .db-inline-edit {
+      position: absolute; z-index: 20;
+      font-family: var(--mono); font-size: var(--f-label);
+      padding: 2px 4px; margin: 0; border: 1px solid var(--accent);
+      border-radius: 4px; background: var(--card); color: var(--text);
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+      min-width: 80px; width: max-content; max-width: 420px;
+      white-space: pre-wrap; word-break: break-all; resize: none; overflow: hidden;
+      outline: none;
+    }
+    .db-inline-edit.null-on { border-color: var(--red); box-shadow: 0 0 0 3px color-mix(in srgb, var(--red) 15%, transparent); }
+    .db-grid-wrap { position: relative; }
+    .ctx-menu { position: fixed; z-index: 60; min-width: 180px; background: var(--card); border: 1px solid var(--sep); border-radius: var(--r-card); box-shadow: var(--shadow-sheet); padding: var(--s1); display: grid; gap: 2px; }
+    .ctx-menu button { text-align: left; font: inherit; font-size: var(--f-body); padding: 6px var(--s3); border: none; background: none; border-radius: var(--r-row); cursor: pointer; color: var(--text); }
+    .ctx-menu button:hover { background: var(--hover); }
+    .ctx-menu button:disabled { color: var(--text-3); cursor: default; }
+    .ctx-menu button:disabled:hover { background: none; }
+    #dbCellText { min-height: 180px; white-space: pre-wrap; }
+    #dbCellText.json { min-height: 260px; }
+    .db-cell-head { display: flex; align-items: baseline; gap: var(--s2); flex-wrap: wrap; }
+    .db-cell-where { font-family: var(--mono); font-size: var(--f-label); color: var(--text-2); }
+    .db-dirty { background: color-mix(in srgb, var(--amber) 16%, transparent); }
+    .db-del td { text-decoration: line-through; color: var(--text-3); background: color-mix(in srgb, var(--red) 7%, transparent); }
+    .db-ins td { background: color-mix(in srgb, var(--green) 9%, transparent); }
+    /* Checked rows tint blue — but a pending cell edit keeps its amber tint so both states read. */
+    tr.db-sel td { background: color-mix(in srgb, var(--accent) 13%, transparent); }
+    tr.db-sel td.db-dirty { background: color-mix(in srgb, var(--amber) 26%, transparent); }
+    .db-act { border: none; background: none; cursor: pointer; font-size: var(--f-label); color: var(--text-3); padding: 0 4px; border-radius: 4px; }
+    .db-act:hover { color: var(--red); background: var(--hover); }
+
+    .db-bar { display: flex; align-items: center; gap: var(--s3); padding: var(--s2) var(--s3); background: color-mix(in srgb, var(--amber) 10%, var(--card)); border: 1px solid color-mix(in srgb, var(--amber) 40%, var(--sep)); border-radius: var(--r-card); font-size: var(--f-body); }
+    .db-bar .btn { margin-left: auto; }
+    .db-bar .btn.commit { background: var(--accent); color: var(--accent-text); }
+    .db-hint { color: var(--text-3); font-size: var(--f-body); padding: var(--s4); }

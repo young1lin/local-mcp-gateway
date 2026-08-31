@@ -67,10 +67,14 @@ function split(path: string): string[] {
 
 /** Match a request's segments against a route pattern, returning captured params or null. */
 function match(route: Route, segs: string[]): Record<string, string> | null {
-  if (route.segs.length !== segs.length) return null;
+  // A trailing "*" segment (as in "/admin/*") swallows whatever remains, uncaptured — the express
+  // suffix wildcard, for static trees whose depth the pattern should not have to know.
+  const star = route.segs.length > 0 && route.segs[route.segs.length - 1] === "*";
+  if (star ? segs.length < route.segs.length - 1 : route.segs.length !== segs.length) return null;
   const params: Record<string, string> = {};
   for (let i = 0; i < segs.length; i++) {
     const p = route.segs[i];
+    if (p === "*") return params; // only reachable as the last segment (see star above)
     if (p.startsWith(":")) {
       try {
         params[p.slice(1)] = decodeURIComponent(segs[i]);

@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { writeJsonAtomic } from "./atomic-json.js";
 import { treeKill, descendantPidsOf } from "./process-tree.js";
+import { pidAlive } from "./pidfile.js";
 import { log } from "./log.js";
 
 /**
@@ -66,14 +67,8 @@ export function dropProcPid(pid: number): void {
   writeLedger(pids.filter((p) => p !== pid));
 }
 
-function alive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
+// alive() moved out: pidAlive (pidfile.ts) is the one implementation — the two copies had already
+// drifted (only that one guards against pid 0 signalling the whole process group).
 
 /**
  * Reap proc children a PREVIOUS instance orphaned. Reads the ledger, clears it (this instance
@@ -91,7 +86,7 @@ export async function reapProcPids(ownPid: number): Promise<number[]> {
   const killed: number[] = [];
   for (const pid of pids) {
     if (mine.has(pid)) continue; // belongs to THIS instance now — never touch it (PID-reuse guard)
-    if (!alive(pid)) continue; // already gone — closed cleanly last run, or the OS reaped it
+    if (!pidAlive(pid)) continue; // already gone — closed cleanly last run, or the OS reaped it
     log("warn", "reaping orphaned proc child from a previous gateway instance", { pid });
     await treeKill(pid);
     killed.push(pid);

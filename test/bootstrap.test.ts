@@ -4,6 +4,8 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { dataDir, dataPath } from "../src/datadir.js";
 import { ensureFirstRun } from "../src/bootstrap.js";
+import { readSecureJson } from "../src/secure/statefile.js";
+import { readEnvStore } from "../src/secure/envstore.js";
 
 describe("dataDir / dataPath", () => {
   afterEach(() => {
@@ -30,9 +32,7 @@ describe("ensureFirstRun", () => {
 
   beforeEach(() => {
     origCwd = process.cwd();
-    // An empty cwd so migration never reads the real repo's .env / config.
     cwd = mkdtempSync(join(tmpdir(), "mcpgw-cwd-"));
-    // A home that does not exist yet, so the "created" branch is exercised.
     home = join(mkdtempSync(join(tmpdir(), "mcpgw-parent-")), "new-home");
     process.chdir(cwd);
     process.env.MCP_GATEWAY_HOME = home;
@@ -46,29 +46,25 @@ describe("ensureFirstRun", () => {
     vi.restoreAllMocks();
   });
 
-  it("creates the data dir, seeds a default config, and generates a token + password", () => {
+  it("creates the data dir, seeds a SEALED config, and puts the token in the sealed env store", () => {
     const r = ensureFirstRun();
     expect(r.created).toBe(true);
     expect(r.newToken).toBeTruthy();
-    expect(r.newPass).toBeTruthy();
-    // The seed config is echo-only and boots cleanly.
-    const cfg = JSON.parse(readFileSync(join(home, "gateway.config.json"), "utf8"));
+    const cfg = readSecureJson<Record<string, any>>(join(home, "gateway.config.json"))!;
     expect(cfg.tokenEnv).toBe("MCP_GATEWAY_TOKEN");
     expect(Object.keys(cfg.servers)).toEqual(["echo"]);
-    // The token landed in .env.
-    const env = readFileSync(join(home, ".env"), "utf8");
-    expect(env).toContain(`MCP_GATEWAY_TOKEN=${r.newToken}`);
-    expect(env).toContain(`GATEWAY_PASS=${r.newPass}`);
+    expect(readEnvStore()["MCP_GATEWAY_TOKEN"]).toBe(r.newToken);
+    expect(existsSync(join(home, ".env"))).toBe(false);
+    expect(readFileSync(join(home, "gateway.config.json"), "utf8")).not.toContain("tokenEnv");
   });
 
-  it("does not print the token or panel password — points at lmg creds", () => {
+  it("does not print the token — points at lmg creds", () => {
     const lines: string[] = [];
     vi.mocked(console.log).mockImplementation((s) => { lines.push(String(s)); });
     const r = ensureFirstRun();
     const text = lines.join("\n");
     expect(text).toContain("lmg creds");
-    expect(text).not.toContain(r.newToken);
-    expect(text).not.toContain(r.newPass);
+    expect(text).not.toContain(r.newToken ?? "<no token>");
   });
 
   it("is idempotent — a second run creates nothing new", () => {
@@ -77,47 +73,40 @@ describe("ensureFirstRun", () => {
     expect(second.created).toBe(false);
     expect(second.migrated).toBe(false);
     expect(second.newToken).toBeUndefined();
-    expect(second.newPass).toBeUndefined();
-    // And the first-run token is preserved verbatim.
-    expect(readFileSync(join(home, ".env"), "utf8")).toContain(`MCP_GATEWAY_TOKEN=${first.newToken}`);
+    expect(readEnvStore()["MCP_GATEWAY_TOKEN"]).toBe(first.newToken);
   });
 
-  it("migrates an existing repo-local .env and keeps its token instead of generating one", () => {
-    // Simulate the user's pre-upgrade setup in the cwd.
+  it("migrates a repo-local .env INTO the sealed store — no plaintext copy, token kept", () => {
     writeFileSync(join(cwd, ".env"), "MCP_GATEWAY_TOKEN=their-existing-token\nMYSQL_PASS=x\n");
     const r = ensureFirstRun();
     expect(r.migrated).toBe(true);
-    expect(r.newToken).toBeUndefined(); // kept the migrated token, did not regenerate
-    const env = readFileSync(join(home, ".env"), "utf8");
-    expect(env).toContain("MCP_GATEWAY_TOKEN=their-existing-token");
-    expect(env).toContain("MYSQL_PASS=x");
+    expect(r.newToken).toBeUndefined();
+    const store = readEnvStore();
+    expect(store["MCP_GATEWAY_TOKEN"]).toBe("their-existing-token");
+    expect(store["MYSQL_PASS"]).toBe("x");
+    expect(existsSync(join(home, ".env"))).toBe(false);
   });
 
-  it("migrates BOTH .env and gateway.config.json — the config copy wins over the seed", () => {
-    // A regression guard: `migrateOnce(env) || migrateOnce(cfg)` short-circuits past the config
-    // copy, which would then seed an echo-only config and silently drop the user's MCPs.
+  it("migrates BOTH .env and gateway.config.json — the config wins over the seed", () => {
     writeFileSync(join(cwd, ".env"), "MCP_GATEWAY_TOKEN=tok\n");
     writeFileSync(
       join(cwd, "gateway.config.json"),
       JSON.stringify({ port: 19999, host: "127.0.0.1", tokenEnv: "MCP_GATEWAY_TOKEN", servers: { mysql: { type: "mysql" } } }),
     );
     ensureFirstRun();
-    const cfg = JSON.parse(readFileSync(join(home, "gateway.config.json"), "utf8"));
-    expect(Object.keys(cfg.servers)).toEqual(["mysql"]); // the user's config, not the echo seed
+    const cfg = readSecureJson<Record<string, any>>(join(home, "gateway.config.json"))!;
+    expect(Object.keys(cfg.servers)).toEqual(["mysql"]);
   });
 
-  it("does not migrate when the data dir already has the file", () => {
+  it("does not migrate when the data dir already has the state", () => {
     writeFileSync(join(cwd, ".env"), "MCP_GATEWAY_TOKEN=cwd-token\n");
-    // A prior run already populated the data dir.
     ensureFirstRun();
-    // Now change cwd's .env; a second run must NOT overwrite the data-dir copy.
     writeFileSync(join(cwd, ".env"), "MCP_GATEWAY_TOKEN=different\n");
     ensureFirstRun();
-    expect(readFileSync(join(home, ".env"), "utf8")).toContain("MCP_GATEWAY_TOKEN=cwd-token");
+    expect(readEnvStore()["MCP_GATEWAY_TOKEN"]).toBe("cwd-token");
   });
 
   it("seeds a config even when migrating from a cwd that has none", () => {
-    // cwd has no gateway.config.json; home is fresh.
     ensureFirstRun();
     expect(existsSync(join(home, "gateway.config.json"))).toBe(true);
   });
@@ -125,8 +114,7 @@ describe("ensureFirstRun", () => {
   it("seeds MCP_GATEWAY_PORT when that is how the operator chose the listen port", () => {
     process.env.MCP_GATEWAY_PORT = "18000";
     ensureFirstRun();
-    const cfg = JSON.parse(readFileSync(join(home, "gateway.config.json"), "utf8"));
-    expect(cfg.port).toBe(18000);
+    expect(readSecureJson<Record<string, any>>(join(home, "gateway.config.json"))!.port).toBe(18000);
   });
 
   it("prints the panel url for the configured port, not a hardcoded 19999", () => {

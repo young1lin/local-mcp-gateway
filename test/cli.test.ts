@@ -84,10 +84,17 @@ function ops(over: Over = {}): Ops & { calls: string[] } {
     token: over.token ?? (() => "tok-123"),
     creds: () => ({
       url: "http://127.0.0.1:19999/",
-      user: "admin",
-      pass: "secret-pass",
       token: over.token ? over.token() : "tok-123",
     }),
+    exportState: () => {
+      calls.push("export");
+      return { version: 1, exportedAt: "", config: { port: 19999 } };
+    },
+    importState: (bundle) => {
+      calls.push("import");
+      if (!bundle || (bundle as { version?: number }).version !== 1) throw new Error("bad bundle");
+      return ["gateway.config.json", "env.json"];
+    },
     skillInstall: () => {
       calls.push("skill:install");
       return ["~/.agents/skills/local-mcp-gateway", "~/.claude/skills/local-mcp-gateway"];
@@ -265,12 +272,12 @@ describe("run", () => {
     expect(f.calls).toEqual(["logs:19999:10:true"]);
   });
 
-  it("prints creds for the panel login and the token", async () => {
+  it("prints the panel url and the token — no login exists to print", async () => {
     const o = io();
     expect(await run(["creds"], o, ops())).toBe(0);
-    expect(o.text()).toContain("admin");
-    expect(o.text()).toContain("secret-pass");
+    expect(o.text()).toContain("http://127.0.0.1:19999/");
     expect(o.text()).toContain("tok-123");
+    expect(o.text()).toContain("(none");
   });
 
   it("prints the token, and fails when there is none", async () => {
@@ -312,5 +319,28 @@ describe("run", () => {
     const p = ops();
     expect(await run(["stop", "--port", "abc"], o, p)).toBe(1);
     expect(p.calls).toEqual([]);
+  });
+});
+
+describe("parseArgv --lines", () => {
+  it("reads a plain line count and the = form", () => {
+    expect(parseArgv(["logs", "-n", "50"]).lines).toBe(50);
+    expect(parseArgv(["logs", "--lines=50"]).lines).toBe(50);
+  });
+
+  it("never eats a following flag as the value — the old bug dropped --json entirely", () => {
+    const p = parseArgv(["logs", "-n", "--json"]);
+    expect(p.badLines).toBe(true); // "--json" is not a line count
+    expect(p.json).toBe(true); // and it still reads as the flag it always was
+  });
+
+  it("refuses non-decimal line counts instead of silently ignoring them", () => {
+    for (const bad of ["0x10", "1e2", "-5", "0", "abc", ""] as const) {
+      expect(parseArgv(["logs", "-n", bad]).badLines, bad).toBe(true);
+    }
+  });
+
+  it("trims --port like MCP_GATEWAY_PORT is trimmed", () => {
+    expect(parseArgv(["stop", "--port", " 8080 "]).port).toBe(8080);
   });
 });

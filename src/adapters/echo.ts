@@ -34,16 +34,22 @@ function createEchoServer(name?: string): Server {
   return server;
 }
 
-/** A named echo adapter: calls land in the Logs tab under this MCP's name. */
+/** A named echo adapter: calls land in the Logs tab under this MCP's name. The name is mutable
+ *  (rename support, like every other adapter) so a renamed MCP keeps logging under its new name
+ *  instead of splitting the log across two keys. */
 export function makeEchoAdapter(name?: string): Adapter {
+  let current = name;
   return {
     type: "echo",
     async build() {
-      return createEchoServer(name);
+      return createEchoServer(current);
     },
     // Fresh server per request so concurrent requests don't share a single transport-bound Server.
     makeServer() {
-      return createEchoServer(name);
+      return createEchoServer(current);
+    },
+    rename(next: string): void {
+      current = next;
     },
   };
 }

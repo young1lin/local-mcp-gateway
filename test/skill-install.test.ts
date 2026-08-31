@@ -34,7 +34,9 @@ function ops(): Ops & { skillCalls: number } {
     logs: async () => undefined,
     open: () => undefined,
     token: () => "tok",
-    creds: () => ({ url: "http://127.0.0.1:19999/", user: "admin", pass: "x", token: "tok" }),
+    creds: () => ({ url: "http://127.0.0.1:19999/", token: "tok" }),
+    exportState: () => ({ version: 1, exportedAt: "" }),
+    importState: () => [],
     foreground: async () => undefined,
     skillInstall: () => {
       o.skillCalls += 1;

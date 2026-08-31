@@ -1,21 +1,14 @@
 import { describe, it, expect } from "vitest";
-import { verifyBearer } from "../src/auth.js";
+import { bearerSecret } from "../src/auth.js";
 
-describe("verifyBearer", () => {
-  const expected = "s3cret-token";
-  it("accepts a correct bearer header", () => {
-    expect(verifyBearer(`Bearer ${expected}`, expected)).toBe(true);
+describe("bearerSecret", () => {
+  it("pulls the token out of a Bearer header", () => {
+    expect(bearerSecret("Bearer s3cret-token")).toBe("s3cret-token");
   });
-  it("rejects missing header", () => {
-    expect(verifyBearer(undefined, expected)).toBe(false);
+  it("returns an empty string when the header is absent", () => {
+    expect(bearerSecret(undefined)).toBe("");
   });
-  it("rejects wrong token (different length)", () => {
-    expect(verifyBearer("Bearer nope", expected)).toBe(false);
-  });
-  it("rejects wrong token (same length)", () => {
-    expect(verifyBearer("Bearer s3cret-tokem", expected)).toBe(false);
-  });
-  it("rejects non-Bearer scheme", () => {
-    expect(verifyBearer(expected, expected)).toBe(false);
+  it("returns an empty string for a non-Bearer scheme", () => {
+    expect(bearerSecret("Basic s3cret-token")).toBe("");
   });
 });

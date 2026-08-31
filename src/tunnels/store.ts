@@ -1,9 +1,9 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { writeJsonAtomic } from "../atomic-json.js";
 import { log } from "../log.js";
 import { dataPath } from "../datadir.js";
-import type { RuleDef, SshConnDef } from "./types.js";
+import { readSecureJson, writeSecureJson } from "../secure/statefile.js";
+import type { GroupKind, RuleDef, SshConnDef } from "./types.js";
 
 export function newId(): string {
   return randomUUID();
@@ -21,9 +21,9 @@ function isPort(n: number): boolean {
 }
 
 /** Input shapes: the store assigns ids, and every optional field has a default. */
-export type ConnInput = Omit<SshConnDef, "id"> & { id?: string };
-export type RuleInput = Omit<RuleDef, "id" | "autoReconnect" | "reconnectInterval" | "enabled" | "mcps"> &
-  Partial<Pick<RuleDef, "id" | "autoReconnect" | "reconnectInterval" | "enabled" | "mcps">>;
+export type ConnInput = Omit<SshConnDef, "id" | "group"> & { id?: string; group?: string };
+export type RuleInput = Omit<RuleDef, "id" | "autoReconnect" | "reconnectInterval" | "enabled" | "mcps" | "group"> &
+  Partial<Pick<RuleDef, "id" | "autoReconnect" | "reconnectInterval" | "enabled" | "mcps" | "group">>;
 
 /**
  * Persists SSH connections and forwarding rules to tunnels.json.
@@ -31,9 +31,14 @@ export type RuleInput = Omit<RuleDef, "id" | "autoReconnect" | "reconnectInterva
  * Pure data: it validates and stores, and knows nothing about sockets or ssh2 — which is what makes
  * every rule in here testable without a network.
  */
+/** The group name every ungrouped row belongs to. Reserved: a stored group may not use it. */
+export const DEFAULT_GROUP = "default";
+
 export class TunnelStore {
   private conns: SshConnDef[] = [];
   private ruleList: RuleDef[] = [];
+  /** Custom group names per list, in panel order. The default group is implicit and never stored. */
+  private groupNames: Record<GroupKind, string[]> = { rules: [], connections: [] };
 
   /** `gatewayPort` is rejected as a local port, since binding it could never work. */
   constructor(private path = dataPath("tunnels.json"), private gatewayPort = 0) {
@@ -41,14 +46,14 @@ export class TunnelStore {
   }
 
   private load(): void {
-    if (!existsSync(this.path)) return;
     let raw: any;
     try {
-      raw = JSON.parse(readFileSync(this.path, "utf8"));
+      raw = readSecureJson<any>(this.path);
     } catch (err) {
       log("warn", "tunnels load failed", { err: (err as Error).message, path: this.path });
       return;
     }
+    if (!raw) return;
     for (const c of Array.isArray(raw?.connections) ? raw.connections : []) {
       if (!c || typeof c.id !== "string" || !str(c.name) || !str(c.host)) continue;
       this.conns.push({
@@ -62,6 +67,7 @@ export class TunnelStore {
         passphrase: typeof c.passphrase === "string" ? c.passphrase : undefined,
         password: typeof c.password === "string" ? c.password : undefined,
         hostKey: str(c.hostKey) || undefined,
+        group: str(c.group) || undefined,
       });
     }
     for (const r of Array.isArray(raw?.rules) ? raw.rules : []) {
@@ -80,12 +86,27 @@ export class TunnelStore {
         reconnectInterval: Math.max(1, num(r.reconnectInterval, 10) || 10),
         enabled: r.enabled === true,
         mcps: Array.isArray(r.mcps) ? r.mcps.filter((m: unknown): m is string => typeof m === "string" && !!m) : [],
+        group: str(r.group) || undefined,
       });
     }
+    const rawGroups = raw as Record<string, unknown>;
+    const groupList = (key: string): string[] => {
+      const names = rawGroups?.[key];
+      return Array.isArray(names)
+        ? names.filter((n): n is string => typeof n === "string" && !!str(n) && str(n) !== DEFAULT_GROUP)
+        : [];
+    };
+    this.groupNames.rules = groupList("ruleGroups");
+    this.groupNames.connections = groupList("connGroups");
   }
 
   private persist(): void {
-    writeJsonAtomic(this.path, { connections: this.conns, rules: this.ruleList });
+    writeSecureJson(this.path, {
+      connections: this.conns,
+      rules: this.ruleList,
+      ruleGroups: this.groupNames.rules,
+      connGroups: this.groupNames.connections,
+    });
   }
 
   isEmpty(): boolean {
@@ -138,6 +159,7 @@ export class TunnelStore {
       out.password = String(input.password);
     }
     if (str(input.hostKey)) out.hostKey = str(input.hostKey);
+    if (str(input.group)) out.group = str(input.group);
     return out;
   }
 
@@ -157,7 +179,7 @@ export class TunnelStore {
     if (clash) throw new Error(`local port ${localPort} is already used by '${clash.name}'`);
     const targetPort = num(input.targetPort);
     if (!isPort(targetPort)) throw new Error(`invalid target port: ${input.targetPort}`);
-    return {
+    const def: RuleDef = {
       id: input.id ?? selfId ?? newId(),
       name,
       connectionId,
@@ -170,6 +192,8 @@ export class TunnelStore {
       enabled: input.enabled === true,
       mcps: Array.isArray(input.mcps) ? input.mcps.filter((m) => typeof m === "string" && !!m) : [],
     };
+    if (str(input.group)) def.group = str(input.group);
+    return def;
   }
 
   // --- mutations --------------------------------------------------------------------------------
@@ -192,6 +216,7 @@ export class TunnelStore {
     if (!def.hostKey && def.host === this.conns[i].host && def.port === this.conns[i].port) {
       def.hostKey = this.conns[i].hostKey;
     }
+    if (!def.group) def.group = this.conns[i].group;
     this.conns[i] = def;
     this.persist();
     return { ...def };
@@ -218,8 +243,16 @@ export class TunnelStore {
   updateRule(id: string, input: RuleInput): RuleDef {
     const i = this.ruleList.findIndex((r) => r.id === id);
     if (i < 0) throw new Error(`unknown rule: ${id}`);
-    // `enabled` is runtime state owned by the manager, not something an edit may silently flip.
-    const def = this.validRule({ ...input, id, enabled: this.ruleList[i].enabled }, id);
+    // `enabled` is runtime state owned by the manager, not something an edit may silently flip;
+    // `mcps` omitted from the input keeps the stored links — the same courtesy `group` gets below.
+    // (An explicit [] still clears them; a create with no mcps still starts from [].)
+    const def = this.validRule({
+      ...input,
+      ...(input.mcps === undefined ? { mcps: this.ruleList[i].mcps } : {}),
+      id,
+      enabled: this.ruleList[i].enabled,
+    }, id);
+    if (!def.group) def.group = this.ruleList[i].group;
     this.ruleList[i] = def;
     this.persist();
     return { ...def, mcps: [...def.mcps] };
@@ -238,6 +271,16 @@ export class TunnelStore {
     this.persist();
   }
 
+  /** Drop a connection's learned host key (a trust reset): the next connect learns it afresh.
+   *  updateConnection cannot express this — it deliberately re-adopts the old key when host/port
+   *  are unchanged, which would silently undo the clear on the very next edit. */
+  clearHostKey(id: string): void {
+    const c = this.conns.find((x) => x.id === id);
+    if (!c || !c.hostKey) return;
+    c.hostKey = undefined;
+    this.persist();
+  }
+
   setHostKey(id: string, fingerprint: string): void {
     const c = this.conns.find((x) => x.id === id);
     if (!c || c.hostKey === fingerprint) return;
@@ -249,6 +292,73 @@ export class TunnelStore {
   replaceAll(conns: SshConnDef[], rules: RuleDef[]): void {
     this.conns = conns;
     this.ruleList = rules;
+    this.persist();
+  }
+
+  // --- groups and order --------------------------------------------------------------------------
+
+  private rowsOf(kind: GroupKind): Array<SshConnDef | RuleDef> {
+    return kind === "rules" ? this.ruleList : this.conns;
+  }
+
+  groupsOf(kind: GroupKind): string[] {
+    return [...this.groupNames[kind]];
+  }
+
+  /** Replace the whole group-name list: create, reorder and delete are all "here is the new list".
+   *  Deleting a group strands its members in the implicit default rather than pointing at nothing. */
+  setGroups(kind: GroupKind, names: unknown): string[] {
+    if (!Array.isArray(names)) throw new Error("groups must be an array");
+    const clean = [...new Set(names.map((n) => str(n)).filter((n) => n && n !== DEFAULT_GROUP))];
+    this.groupNames[kind] = clean;
+    for (const row of this.rowsOf(kind)) {
+      if (row.group && !clean.includes(row.group)) row.group = undefined;
+    }
+    this.persist();
+    return this.groupsOf(kind);
+  }
+
+  renameGroup(kind: GroupKind, from: string, to: string): { groups: string[]; moved: number } {
+    const src = str(from);
+    const dst = str(to);
+    if (!src || !dst) throw new Error("from and to are required");
+    if (dst === DEFAULT_GROUP) throw new Error("the default group cannot be recreated under a new name");
+    if (!this.groupNames[kind].includes(src)) throw new Error("unknown group: " + src);
+    if (src !== dst && this.groupNames[kind].includes(dst)) throw new Error("group already exists: " + dst);
+    this.groupNames[kind] = this.groupNames[kind].map((n) => (n === src ? dst : n));
+    let moved = 0;
+    for (const row of this.rowsOf(kind)) {
+      if (row.group === src) { row.group = dst; moved++; }
+    }
+    this.persist();
+    return { groups: this.groupsOf(kind), moved };
+  }
+
+  /** Put one row in a group. An empty name (or the reserved default) means the implicit default. */
+  setGroup(kind: GroupKind, id: string, group: unknown): string {
+    const name = str(group);
+    if (name && name !== DEFAULT_GROUP && !this.groupNames[kind].includes(name)) {
+      throw new Error("unknown group: " + name);
+    }
+    const row = this.rowsOf(kind).find((x) => x.id === id);
+    if (!row) throw new Error("unknown " + (kind === "rules" ? "rule" : "SSH connection") + ": " + id);
+    row.group = name && name !== DEFAULT_GROUP ? name : undefined;
+    this.persist();
+    return row.group ?? DEFAULT_GROUP;
+  }
+
+  /** Impose a full order on one list. Rows the caller omitted keep their relative order after the
+   *  mentioned ones, so a stale panel reorder cannot drop or duplicate anything. */
+  reorder(kind: GroupKind, ids: unknown): void {
+    if (!Array.isArray(ids)) throw new Error("ids must be an array");
+    const order = ids.filter((x): x is string => typeof x === "string");
+    const rank = (id: string) => {
+      const i = order.indexOf(id);
+      return i < 0 ? order.length : i;
+    };
+    const sorted = [...this.rowsOf(kind)].sort((a, b) => rank(a.id) - rank(b.id));
+    if (kind === "rules") this.ruleList = sorted as RuleDef[];
+    else this.conns = sorted as SshConnDef[];
     this.persist();
   }
 

@@ -52,10 +52,11 @@ afterAll(async () => {
 });
 
 describe("POST /api/mcps/test", () => {
-  it("requires the admin token like every other /api route", async () => {
+  it("runs the test without credentials — /api has no gate beyond the loopback guard", async () => {
     const { app } = setup();
     const res = await request(app).post("/api/mcps/test").send({ type: "mysql", host: "127.0.0.1", port: 1 });
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(false); // the request itself is served; nothing listens on port 1
   });
 
   it("refuses a type with no connection test, naming the testable ones", async () => {
