@@ -262,3 +262,37 @@ describe("ManagedStore groups", () => {
 });
 
 
+
+describe("mcpEnabled — run/stop state for config-sourced MCPs", () => {
+  it("persists a Stop on a name with no managed entry, and reads it back after reload", () => {
+    const store = new ManagedStore(path);
+    store.setEnabled("from-config", false);
+    expect(store.enabledFor("from-config")).toBe(false);
+    const reloaded = new ManagedStore(path);
+    expect(reloaded.enabledFor("from-config")).toBe(false);
+    reloaded.setEnabled("from-config", true);
+    expect(new ManagedStore(path).enabledFor("from-config")).toBe(true);
+  });
+
+  it("defaults to undefined (callers treat it as \"run\") when nothing was recorded", () => {
+    const store = new ManagedStore(path);
+    expect(store.enabledFor("never-touched")).toBeUndefined();
+  });
+
+  it("moves the flag on rename and clears it on remove", () => {
+    const store = new ManagedStore(path);
+    store.setEnabled("cfg-a", false);
+    store.rename("cfg-a", "cfg-b");
+    expect(store.enabledFor("cfg-a")).toBeUndefined();
+    expect(store.enabledFor("cfg-b")).toBe(false);
+    store.remove("cfg-b");
+    expect(store.enabledFor("cfg-b")).toBeUndefined();
+  });
+
+  it("consumes the flag when the MCP becomes a managed override", () => {
+    const store = new ManagedStore(path);
+    store.setEnabled("cfg-a", false);
+    store.upsertOverride("cfg-a", { type: "echo" });
+    expect(store.enabledFor("cfg-a")).toBe(false); // entry.enabled inherited, not reset to true
+  });
+});

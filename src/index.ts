@@ -82,10 +82,16 @@ async function main() {
       const r = store.resourceEnabled(name);
       if (r !== undefined && adapter.resourceToggle) adapter.resourceToggle.on = r;
       registry.register(name, "config", def, adapter);
+      // Honour a Stop the user made in the panel. Config MCPs have no `enabled` of their own in
+      // gateway.config.json — the panel does not rewrite the user's committed file — so the state
+      // lives in managed.json (mcpEnabled, see ManagedStore.setEnabled); starting unconditionally
+      // made Stop last only until the next boot.
+      const enabled = store.enabledFor(name) !== false;
+      if (!enabled) log("info", "config mcp stays stopped (panel Stop)", { name, type: def.type });
       // A lazy MCP (a proc by default, anything with lazy:true) stays idle at boot — the first
       // client request wakes it (see Registry.ensureStarted), which is the memory the gateway
       // exists to save: an idle npx/uvx child is 50-150MB of nothing.
-      if (isLazy(def)) log("info", "config mcp idle (starts on first request)", { name, type: def.type });
+      else if (isLazy(def)) log("info", "config mcp idle (starts on first request)", { name, type: def.type });
       else {
         await registry.start(name);
         log("info", "config mcp ready", { name, type: def.type });
@@ -100,8 +106,10 @@ async function main() {
   for (const m of store.all()) {
     if (m.override && registry.has(m.name)) {
       try {
-        await registry.updateDef(m.name, m.def, makeAdapter(m.def, m.name));
-        log("info", "config mcp override applied", { name: m.name, type: m.def.type });
+        // `start: m.enabled` — an override must not resurrect an MCP the user stopped, and the
+        // config loop above already left a disabled one unstarted.
+        await registry.updateDef(m.name, m.def, makeAdapter(m.def, m.name), { start: m.enabled });
+        log("info", "config mcp override applied", { name: m.name, type: m.def.type, enabled: m.enabled });
       } catch (err) {
         log("error", "config mcp override failed", { name: m.name, err: (err as Error).message });
       }

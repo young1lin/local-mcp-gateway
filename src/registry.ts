@@ -309,8 +309,15 @@ export class Registry {
     invalidateMemoryCache();
   }
 
-  /** Replace an entry's def + adapter and restart it (used by config edit). */
-  async updateDef(name: string, def: ServerDef, adapter: Adapter): Promise<void> {
+  /**
+   * Replace an entry's def + adapter and restart it (used by config edit).
+   *
+   * `start` defaults to true — an edit from the panel is expected to take effect immediately. Pass
+   * false to swap the definition and leave the MCP stopped: boot does that for an override on an MCP
+   * the user has stopped, and the edit route does it for one that was already stopped, neither of
+   * which should be started as a side effect of a definition change.
+   */
+  async updateDef(name: string, def: ServerDef, adapter: Adapter, opts: { start?: boolean } = {}): Promise<void> {
     const e = this.require(name);
     // One queue slot for the whole swap, calling doStop/doStart directly: going through the public
     // stop()/start() from in here would wait on a queue this operation already holds.
@@ -325,8 +332,8 @@ export class Registry {
       e.adapter = adapter;
       if (prevDisabled && adapter.toolToggle) adapter.toolToggle.disabled = new Set(prevDisabled);
       if (prevResources !== undefined && adapter.resourceToggle) adapter.resourceToggle.on = prevResources;
-      await this.doStart(e);
-      log("info", "mcp config updated", { name, type: def.type });
+      if (opts.start !== false) await this.doStart(e);
+      log("info", "mcp config updated", { name, type: def.type, started: opts.start !== false });
     });
   }
 
