@@ -6,6 +6,7 @@ import { bsonPlain } from "../src/adapters/mongo.js";
 import { Long, ObjectId, Timestamp } from "mongodb";
 import { RedisAdapter, typeAwareRead, readWindow, type RedisReadClient } from "../src/adapters/redis.js";
 import { PgAdapter } from "../src/adapters/pg.js";
+import { Lazy } from "../src/adapters/direct.js";
 import { MongoAdapter, writesViaAggregate } from "../src/adapters/mongo.js";
 import { ProcAdapter } from "../src/adapters/proc.js";
 import { makeToolServer } from "../src/adapters/tool-server.js";
@@ -714,5 +715,38 @@ describe("echo adapter rename", () => {
     } finally {
       await client.close();
     }
+  });
+});
+
+describe("Lazy.dispose", () => {
+  it("closes a connection that finished opening after dispose was called", async () => {
+    // Stopping an MCP while its first connection is still being established used to drop the
+    // in-flight promise: the driver connected into a handle nothing referenced, and the pool it
+    // opened stayed open for the life of the process.
+    const closed: number[] = [];
+    let resolveOpen: ((v: { id: number }) => void) | undefined;
+    const lazy = new Lazy<{ id: number }>(() => new Promise((res) => { resolveOpen = res; }));
+    void lazy.get();
+    const disposed = lazy.dispose((v) => { closed.push(v.id); });
+    resolveOpen!({ id: 1 }); // the driver connects, after the stop began
+    await disposed;
+    expect(closed).toEqual([1]);
+  });
+
+  it("closes an already-open connection, exactly once", async () => {
+    const closed: number[] = [];
+    const lazy = new Lazy(async () => ({ id: 7 }));
+    await lazy.get();
+    await lazy.dispose((v) => { closed.push(v.id); });
+    await lazy.dispose((v) => { closed.push(v.id); }); // a second stop has nothing left to close
+    expect(closed).toEqual([7]);
+  });
+
+  it("has nothing to close when the connection never came up", async () => {
+    const closed: unknown[] = [];
+    const lazy = new Lazy(async () => { throw new Error("no route to host"); });
+    await expect(lazy.get()).rejects.toThrow();
+    await expect(lazy.dispose((v) => { closed.push(v); })).resolves.toBeUndefined();
+    expect(closed).toEqual([]);
   });
 });

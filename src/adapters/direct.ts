@@ -44,6 +44,31 @@ export class Lazy<T> {
     this.pending = undefined;
     return value;
   }
+
+  /**
+   * Forget the connection and shut it down, waiting for one still being opened.
+   *
+   * `take()` alone drops an in-flight `pending`, which is the window that matters: stop or delete an
+   * MCP while its first connection is still being established (mongo allows 5s for server
+   * selection) and the driver finished connecting into a Lazy that no longer referenced it — a pool
+   * or a client nothing would ever close, for the lifetime of the process. A failed attempt has
+   * nothing to close, so its rejection is swallowed here rather than surfaced as a close error.
+   */
+  async dispose(close: (value: T) => void | Promise<void>): Promise<void> {
+    const value = this.value;
+    const pending = this.pending;
+    this.value = undefined;
+    this.pending = undefined;
+    if (value) return void (await close(value));
+    if (!pending) return;
+    let opened: T;
+    try {
+      opened = await pending;
+    } catch {
+      return; // never connected
+    }
+    await close(opened);
+  }
 }
 
 /**

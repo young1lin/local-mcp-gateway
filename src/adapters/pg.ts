@@ -524,6 +524,6 @@ export class PgAdapter extends DirectAdapter {
   }
 
   async close(): Promise<void> {
-    await this.conn.take()?.end();
+    await this.conn.dispose((pool) => pool.end());
   }
 }
