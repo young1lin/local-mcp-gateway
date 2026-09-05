@@ -358,7 +358,7 @@ describe("stored body pruning", () => {
     }
     expect((await readCall(MCP, 1))?.bodyGone).toBe(true); // past the keep window
     expect((await readCall(MCP, 5))?.bodyGone).toBe(true);
-    expect((await readCall(MCP, 6))?.bodyGone).toBe(false); // the 50 newest stay whole
+    expect((await readCall(MCP, 6))?.bodyGone).toBeFalsy(); // key absent ⇔ the 50 newest stay whole
     const newest = await readCall(MCP, 55);
     expect(newest?.output.length).toBe(3 * 1024);
   });
