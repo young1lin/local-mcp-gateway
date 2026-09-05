@@ -2,6 +2,7 @@ import type { Client } from "@modelcontextprotocol/client";
 import type { ServerCapabilities } from "@modelcontextprotocol/client";
 import { Server, type Tool } from "@modelcontextprotocol/server";
 import { contentText, logged } from "../calls.js";
+import { log } from "../log.js";
 
 export interface ProxyOpts {
   /** Registry name of this MCP — the key its call log is filed under. */
@@ -46,22 +47,51 @@ export function makeProxyServer(client: Client, opts: ProxyOpts = {}): Server {
     { name: "mcp-gateway-proxy", version: "1.0" },
     { capabilities, ...(opts.description ? { instructions: opts.description } : {}) },
   );
-  const safe = async <T>(p: Promise<T>, fallback: T): Promise<T> => {
-    try { return await p; } catch { return fallback; }
+  /**
+   * An empty list beats a broken one — a remote that fails to answer tools/list should not take the
+   * client's whole session down. But it must not be SILENT: an empty result is indistinguishable
+   * from "this server has no tools", so the one thing that says otherwise is this log line. The
+   * failure worth naming is the SDK's own `ListPaginationExceeded`, thrown when a remote's
+   * pagination has not converged within ClientOptions.listMaxPages (64) — a real remote with more
+   * pages than that reported zero tools here, with nothing anywhere to say why.
+   */
+  const safe = async <T>(what: string, p: Promise<T>, fallback: T): Promise<T> => {
+    try {
+      return await p;
+    } catch (err) {
+      log("warn", "proxied list failed; answering empty", {
+        mcp: opts.name, what, err: (err as Error)?.message ?? String(err),
+      });
+      return fallback;
+    }
   };
+
+  /**
+   * Forward the caller's cursor, when it sent one.
+   *
+   * The SDK client's list methods have two modes: called with no cursor they walk the remote's
+   * pagination themselves and return every page aggregated; called with `{ cursor }` they fetch
+   * exactly that one page. Passing the caller's cursor through is what makes explicit per-page
+   * paging possible AT ALL — without it a caller holding a cursor is silently answered page one
+   * again. The remote's cursors are opaque strings, so handing them back and forth unchanged is
+   * the whole of it.
+   */
+  const cursorOf = (params: { cursor?: unknown } | undefined): { cursor: string } | undefined =>
+    typeof params?.cursor === "string" && params.cursor ? { cursor: params.cursor } : undefined;
   // Strip `annotations` (added in protocol 2025-03-26) from every tool. Some clients negotiate an
   // older version over HTTP — Claude Code requests 2024-11-05 — under which `annotations` is an
   // unknown key; strict schema parsing then rejects the whole tools/list ("tools fetch failed").
-  server.setRequestHandler('tools/list', async () => {
-    const res = await safe(client.listTools(), { tools: [] });
+  server.setRequestHandler('tools/list', async (req) => {
+    const res = await safe("tools/list", client.listTools(cursorOf(req.params)), { tools: [] });
     const tools = (res.tools ?? []).map((t: Record<string, unknown>) => {
       const out = { ...t };
       delete out.annotations;
       return out;
     });
+    const next = (res as { nextCursor?: string }).nextCursor;
     // The remote already returned spec-shaped Tool entries; the local map widens them to a record
     // (only to delete `annotations`), so cast back to the spec type the handler must return.
-    return { tools: tools as unknown as Tool[] };
+    return { tools: tools as unknown as Tool[], ...(next ? { nextCursor: next } : {}) };
   });
   // The remote's answer is logged as the client sees it, including an in-band `isError` failure.
   server.setRequestHandler('tools/call', async (req) =>
@@ -77,7 +107,8 @@ export function makeProxyServer(client: Client, opts: ProxyOpts = {}): Server {
   // capability to be advertised for a handler, and we hide resources (a DB's thousands of table
   // schemas) to keep client context clean. A probe against a hidden capability gets Method Not Found.
   if (exposeResources) {
-    server.setRequestHandler('resources/list', async () => safe(client.listResources(), { resources: [] }));
+    server.setRequestHandler('resources/list', async (req) =>
+      safe("resources/list", client.listResources(cursorOf(req.params)), { resources: [] }));
     // Logged like tools/call above (and like the direct adapters' mountResources): a read is a
     // billed/observable action on the remote, and the Logs tab must show it either way.
     server.setRequestHandler('resources/read', async (req) =>
@@ -90,7 +121,8 @@ export function makeProxyServer(client: Client, opts: ProxyOpts = {}): Server {
       ));
   }
   if (exposePrompts) {
-    server.setRequestHandler('prompts/list', async () => safe(client.listPrompts(), { prompts: [] }));
+    server.setRequestHandler('prompts/list', async (req) =>
+      safe("prompts/list", client.listPrompts(cursorOf(req.params)), { prompts: [] }));
     server.setRequestHandler('prompts/get', async (req) => client.getPrompt(req.params as never));
   }
   return server;
