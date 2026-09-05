@@ -231,7 +231,7 @@ export function recordCall(rawMcp: string | undefined, rec: CallRecord): void {
         await writeFile(bodyFile(mcp, entry.seq), output, { encoding: "utf8", mode: 0o600 });
         chmodPrivate(bodyFile(mcp, entry.seq));
         // Keep the newest BODY_KEEP payloads; the index keeps every call either way.
-        await rm(bodyFile(mcp, entry.seq - BODY_KEEP), { force: true });
+        await keepNewestBodies(mcp);
       }
       const line = JSON.stringify(entry) + "\n";
       await appendFile(fileFor(mcp), line, "utf8");
@@ -242,6 +242,37 @@ export function recordCall(rawMcp: string | undefined, rec: CallRecord): void {
       if (Date.now() - (s.sweptAt ?? 0) > SWEEP_EVERY_MS) await sweepAge(mcp, s);
     })
     .catch((err) => onError("append", err));
+}
+
+/**
+ * Keep the newest BODY_KEEP stored payloads for one MCP, dropping the rest.
+ *
+ * By directory listing rather than by arithmetic on the sequence. A body is written only for a reply
+ * that outgrew the preview, so the numbered files are SPARSE: `rm(seq - BODY_KEEP)` deleted a name
+ * that usually did not exist, and every genuinely old payload — up to BODY_MAX each — stayed on disk
+ * for the life of the data directory. Called after each body write, so the directory settles at
+ * BODY_KEEP files; the listing it walks is that same size, which is why doing it every time is cheap.
+ *
+ * (Not `pruneBodies` — that name belongs to the retention sweep's index-driven removal below.)
+ */
+async function keepNewestBodies(mcp: string): Promise<void> {
+  let names: string[];
+  try {
+    names = await readdir(bodyDir(mcp));
+  } catch {
+    return; // nothing stored yet
+  }
+  const seqs: number[] = [];
+  for (const name of names) {
+    if (!name.endsWith(".txt")) continue;
+    const n = Number(name.slice(0, -4));
+    if (Number.isInteger(n)) seqs.push(n);
+  }
+  if (seqs.length <= BODY_KEEP) return;
+  seqs.sort((a, b) => a - b);
+  for (const n of seqs.slice(0, seqs.length - BODY_KEEP)) {
+    await rm(bodyFile(mcp, n), { force: true });
+  }
 }
 
 /** Windows transient rename codes: a real-time scanner briefly holds the just-written tmp file. */
