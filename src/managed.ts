@@ -176,6 +176,28 @@ export function loadTokens(path = dataPath("managed.json")): TokenRec[] {
 }
 
 /** Persists user-added MCPs so they survive a gateway restart. */
+/**
+ * Per-MCP run/stop state for CONFIG-file MCPs, keyed by MCP name.
+ *
+ * A managed MCP carries its own `enabled` on its entry; a config MCP has no entry to carry one, and
+ * gateway.config.json is the user's committed file, which the panel does not rewrite. Without this,
+ * Stop on a config MCP held only until the next boot, where the config loop started it again — the
+ * button looked like it had worked and silently had not. Absent in older files: everything runs.
+ */
+export function loadMcpEnabled(path = dataPath("managed.json")): Record<string, boolean> {
+  try {
+    const raw = readSecureJson<{ mcpEnabled?: Record<string, unknown> }>(path);
+    if (!raw) return {};
+    const out: Record<string, boolean> = {};
+    for (const [k, v] of Object.entries(raw.mcpEnabled ?? {})) {
+      if (typeof v === "boolean") out[k] = v;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
 export class ManagedStore {
   private entries: ManagedEntry[];
   private toolToggles: Record<string, string[]>;
@@ -184,6 +206,7 @@ export class ManagedStore {
   private order: string[];
   private groups: string[];
   private mcpGroups: Record<string, string>;
+  private mcpEnabled: Record<string, boolean>;
 
   constructor(private path = dataPath("managed.json")) {
     this.entries = loadManaged(path);
@@ -193,6 +216,7 @@ export class ManagedStore {
     this.order = loadOrder(path);
     this.groups = loadGroups(path);
     this.mcpGroups = loadMcpGroups(path);
+    this.mcpEnabled = loadMcpEnabled(path);
   }
 
   all(): ManagedEntry[] {
@@ -213,7 +237,12 @@ export class ManagedStore {
   upsertOverride(name: string, def: ServerDef): void {
     const existing = this.entries.find((x) => x.name === name);
     if (existing) { existing.def = def; existing.override = true; }
-    else this.entries.push({ name, def, enabled: true, override: true });
+    else {
+      // The override inherits the run/stop state the user already chose for this name, rather than
+      // resetting it — an edit that flipped a stopped MCP back on read as the panel ignoring the Stop.
+      this.entries.push({ name, def, enabled: this.mcpEnabled[name] ?? true, override: true });
+      delete this.mcpEnabled[name];
+    }
     this.persist();
   }
 
@@ -221,6 +250,7 @@ export class ManagedStore {
     this.entries = this.entries.filter((e) => e.name !== name);
     this.order = this.order.filter((n) => n !== name); // a deleted MCP holds no sidebar slot
     delete this.mcpGroups[name]; // ...nor a group membership
+    delete this.mcpEnabled[name]; // ...nor a run/stop state
     this.persist();
   }
 
@@ -241,6 +271,12 @@ export class ManagedStore {
       delete this.mcpGroups[oldName];
       this.persist();
     }
+    // And for its run/stop state, so a renamed config MCP keeps honoring the panel's Stop.
+    if (this.mcpEnabled[oldName] !== undefined) {
+      this.mcpEnabled[newName] = this.mcpEnabled[oldName];
+      delete this.mcpEnabled[oldName];
+      this.persist();
+    }
   }
 
   /** Replace a managed MCP's def (used by config edit). */
@@ -254,10 +290,15 @@ export class ManagedStore {
 
   setEnabled(name: string, enabled: boolean): void {
     const e = this.entries.find((x) => x.name === name);
-    if (e) {
-      e.enabled = enabled;
-      this.persist();
-    }
+    if (e) e.enabled = enabled;
+    else this.mcpEnabled[name] = enabled; // a config MCP has no entry — the side-map is its state
+    this.persist();
+  }
+
+  /** Run/stop state for any MCP: the managed entry's own flag, else the config-MCP side-map. */
+  enabledFor(name: string): boolean | undefined {
+    const e = this.entries.find((x) => x.name === name);
+    return e ? e.enabled : this.mcpEnabled[name];
   }
 
   /** The tools a user has turned off for this MCP (empty when none / unknown). */
@@ -403,6 +444,8 @@ export class ManagedStore {
       // Omitted while empty, so a panel that never made a group leaves the file exactly as it was.
       ...(this.groups.length ? { groups: this.groups } : {}),
       ...(Object.keys(this.mcpGroups).length ? { mcpGroups: this.mcpGroups } : {}),
+      // Same convention: an older file with no key means "everything runs".
+      ...(Object.keys(this.mcpEnabled).length ? { mcpEnabled: this.mcpEnabled } : {}),
     });
   }
 }

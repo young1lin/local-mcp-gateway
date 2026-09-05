@@ -21,7 +21,19 @@ export interface Req extends IncomingMessage {
   path: string;
 }
 export type Res = ServerResponse;
-export type Handler = (req: Req, res: Res) => unknown | Promise<unknown>;
+export interface Handler {
+  (req: Req, res: Res): unknown | Promise<unknown>;
+  /**
+   * Optional synchronous pre-check, run after the route matches but BEFORE the body is read.
+   *
+   * Auth lives inside the handler, so an unauthenticated caller used to get to push a whole
+   * BODY_LIMIT of JSON into the heap and only then be told 401. Anything that can refuse a request
+   * from its headers alone belongs here instead. Return the response to send — status and body, so
+   * each route keeps its own error shape — or undefined to let the request through to the handler
+   * as usual.
+   */
+  refuse?: (req: IncomingMessage) => { status: number; body: unknown } | undefined;
+}
 
 /** Read a single request header, case-insensitively (node lowercases them; arrays only for set-cookie). */
 export function header(req: IncomingMessage, name: string): string | undefined {
@@ -49,6 +61,19 @@ export function sendEmpty(res: Res, status: number): void {
   if (res.headersSent) return;
   res.writeHead(status);
   res.end();
+}
+
+/**
+ * Throw away a request body nobody is going to read.
+ *
+ * Ending a response while the request still has unread data makes node close the connection rather
+ * than keep it alive, so a client that gets a run of 404s pays a new TCP handshake for each. Resume
+ * rather than destroy: the bytes are discarded as they arrive and nothing is buffered.
+ */
+function discardBody(req: IncomingMessage): void {
+  if (req.readableEnded || req.destroyed) return;
+  req.on("error", () => { /* the peer gave up mid-body; there is nothing to report */ });
+  req.resume();
 }
 
 interface Route {
@@ -179,6 +204,14 @@ export class Router {
       req.params = params;
       req.query = new URLSearchParams(qIdx < 0 ? "" : url.slice(qIdx + 1));
       req.path = path;
+      // Before the body: a request that is going to be refused should not be listened to (see the
+      // note on Handler.refuse).
+      const refused = route.handler.refuse?.(raw);
+      if (refused) {
+        discardBody(raw);
+        sendJson(res, refused.status, refused.body);
+        return;
+      }
       try {
         req.body = await readJsonBody(raw);
       } catch (err) {
@@ -193,6 +226,9 @@ export class Router {
       }
       return;
     }
+    // Nothing handled this, so nothing consumed the body. Answering an unread request makes node
+    // drop the connection instead of keeping it alive, so drain it first.
+    discardBody(raw);
     sendJson(res, 404, { error: `no route for ${method} ${path}` });
   }
 

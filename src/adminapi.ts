@@ -749,8 +749,11 @@ export function mountAdminApi(
     }
     if (e.source === "config") store.upsertOverride(name, def);
     else store.updateDef(name, def);
+    // An edit is not a start. A stopped MCP that came back up because its connection string was
+    // corrected reads as the panel ignoring the Stop — so a stopped one stays stopped.
+    const wasRunning = !!e.server;
     try {
-      await registry.updateDef(name, def, adapter);
+      await registry.updateDef(name, def, adapter, { start: wasRunning });
     } catch (err) {
       return sendJson(res, 500, { error: `restart failed: ${(err as Error).message}` });
     }

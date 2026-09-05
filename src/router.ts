@@ -92,10 +92,20 @@ export function buildApp(
   /** Every MCP endpoint is bearer-gated against the token set, and answers a rejection in JSON-RPC
    *  shape. The matched token's label is carried across the SDK (via withCallClient) so the call log
    *  and the traffic log can attribute every request to the client that made it. */
-  const bearer = (h: Handler): Handler => (req, res) => {
-    const rec = tokens.verify(bearerSecret(header(req, "authorization")));
-    if (!rec) return jsonError(res, 401, "Unauthorized");
-    return withCallClient(rec.label, () => h(req, res));
+  const bearer = (h: Handler): Handler => {
+    const wrapped: Handler = (req, res) => {
+      const rec = tokens.verify(bearerSecret(header(req, "authorization")));
+      if (!rec) return jsonError(res, 401, "Unauthorized");
+      return withCallClient(rec.label, () => h(req, res));
+    };
+    // Refuse an unknown token before the router reads the request body — an MCP POST can carry up
+    // to BODY_LIMIT, and none of it needs to be read to know the caller cannot be served. The check
+    // inside `wrapped` is still the gate; this only moves the rejection earlier.
+    wrapped.refuse = (req) =>
+      tokens.verify(bearerSecret(header(req as Req, "authorization")))
+        ? undefined
+        : { status: 401, body: { error: "Unauthorized" } };
+    return wrapped;
   };
 
   /**

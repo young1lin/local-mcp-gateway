@@ -447,6 +447,6 @@ export class MongoAdapter extends DirectAdapter {
   }
 
   async close(): Promise<void> {
-    await this.conn.take()?.close();
+    await this.conn.dispose((client) => client.close());
   }
 }

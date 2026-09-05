@@ -345,3 +345,21 @@ describe("call log retention", () => {
       expect(await readToolHistory(MCP, "never")).toEqual([]);
     });
   });
+
+describe("stored body pruning", () => {
+  it("prunes stored body files by directory listing, not by sequence arithmetic", async () => {
+    // 55 oversized replies → body files at seqs 1..55. Real logs are sparser (only a reply over
+    // the 2 KB preview is stored at all); the arithmetic rm(seq - 50) missed the gaps and left
+    // genuinely old payloads on disk forever. The newest BODY_KEEP(50) must stay readable in full.
+    const big = "x".repeat(3 * 1024);
+    for (let i = 0; i < 55; i++) {
+      recordCall(MCP, { tool: "t", args: undefined, ok: true, ms: 1, output: big });
+      await flushCalls(MCP);
+    }
+    expect((await readCall(MCP, 1))?.bodyGone).toBe(true); // past the keep window
+    expect((await readCall(MCP, 5))?.bodyGone).toBe(true);
+    expect((await readCall(MCP, 6))?.bodyGone).toBeFalsy(); // key absent ⇔ the 50 newest stay whole
+    const newest = await readCall(MCP, 55);
+    expect(newest?.output.length).toBe(3 * 1024);
+  });
+});

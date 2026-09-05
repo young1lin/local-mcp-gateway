@@ -1,7 +1,19 @@
 import type { Client } from "@modelcontextprotocol/client";
+import { log } from "./log.js";
 
 /** Gateway page size for tools/resources browsing. */
 export const PAGE_SIZE = 50;
+
+/**
+ * Ceiling on server round trips inside one fill.
+ *
+ * Following `nextCursor` is an unbounded loop driven entirely by the far side, so a server that
+ * never exhausts itself would spin here and grow `acc` until the process dies. The cap turns that
+ * into a truncated list and a log line. 200 pages is far past any real server — a schema with
+ * thousands of table resources arrives in a single dump, and a remote that paginates sends tens
+ * per page.
+ */
+const MAX_FILL_PAGES = 200;
 
 export type ListKind = "tools" | "resources" | "prompts";
 
@@ -93,8 +105,23 @@ export async function listPage(
       cache.started = true;
     }
     // Pull more from the server until the requested window is covered or the server is exhausted.
-    while (offset + PAGE_SIZE > cache.acc.length && cache.serverNext) {
-      const p = await fetchFromServer(client, kind, cache.serverNext);
+    // A server that hands back the cursor it was just given makes no progress: every fetch returns
+    // the same page, `acc` grows by a duplicate each time and `serverNext` never clears. Treat a
+    // repeated cursor as exhausted, and cap the round trips either way — both are guards against
+    // the far side, which is why they live here rather than in any one adapter.
+    for (let page = 0; offset + PAGE_SIZE > cache.acc.length && cache.serverNext; page++) {
+      if (page >= MAX_FILL_PAGES) {
+        log("warn", "list paging stopped at the page cap", { kind, pages: page, items: cache.acc.length });
+        cache.serverNext = undefined;
+        break;
+      }
+      const from = cache.serverNext;
+      const p = await fetchFromServer(client, kind, from);
+      if (p.nextCursor === from) {
+        log("warn", "list paging stopped: server repeated its cursor", { kind, items: cache.acc.length });
+        cache.serverNext = undefined;
+        break;
+      }
       cache.acc.push(...p.items);
       cache.serverNext = p.nextCursor;
     }

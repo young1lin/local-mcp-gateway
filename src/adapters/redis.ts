@@ -620,8 +620,9 @@ export class RedisAdapter extends DirectAdapter {
   }
 
   async close(): Promise<void> {
-    const client = this.conn.take();
-    client?.removeAllListeners();
-    client?.disconnect();
+    await this.conn.dispose((client) => {
+      client.removeAllListeners();
+      client.disconnect();
+    });
   }
 }

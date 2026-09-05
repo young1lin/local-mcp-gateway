@@ -205,3 +205,34 @@ describe("Forward failure handling", () => {
     }
   });
 });
+
+describe("Forward byte accounting", () => {
+  it("does not count a socket twice when the rule is stopped while it is carrying traffic", async () => {
+    const port = await freePort();
+    const f = new Forward({ localPort: port, targetHost: "127.0.0.1", targetPort: echoPort }, tcpOpener());
+    await f.listen();
+    const c = connect({ host: "127.0.0.1", port });
+    try {
+      await new Promise<void>((r) => c.once("connect", () => r()));
+      c.write("hello");
+      await new Promise<void>((r) => c.once("data", () => r()));
+      await new Promise((r) => setTimeout(r, 40));
+
+      const before = f.stats();
+      expect(before.sockets).toBe(1);
+      expect(before.bytesIn).toBe(5);
+      expect(before.bytesOut).toBe(5);
+
+      // close() banks the live socket's counters and then destroys it, which makes the socket emit
+      // `close` and run the same accounting again — a rule stopped mid-transfer reported double.
+      await f.close();
+      await new Promise((r) => setTimeout(r, 60)); // let that `close` handler run
+      const after = f.stats();
+      expect(after.bytesIn).toBe(before.bytesIn);
+      expect(after.bytesOut).toBe(before.bytesOut);
+      expect(after.sockets).toBe(0);
+    } finally {
+      c.destroy();
+    }
+  });
+});

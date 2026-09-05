@@ -95,3 +95,47 @@ describe("listPage under concurrent readers", () => {
     expect(a.total ?? b.total).toBe(130);
   });
 });
+
+describe("listPage refuses to follow a server that makes no progress", () => {
+  /** A server that hands back the cursor it was given — the fill loop must not spin on it. */
+  function stuckClient(page: unknown[]): Client {
+    return {
+      listTools: ((p?: { cursor?: string }) =>
+        Promise.resolve({ tools: page, nextCursor: p?.cursor ?? "1" })) as never,
+    } as unknown as Client;
+  }
+
+  it("stops on a repeated cursor instead of accumulating forever", async () => {
+    const page = Array.from({ length: 10 }, (_, i) => ({ name: `t${i}` }));
+    const cache = newPageCache();
+    const res = await listPage(stuckClient(page), "tools", cache);
+    expect(res.items).toHaveLength(10);
+    expect(cache.acc).toHaveLength(10); // the repeated page was not appended a second time
+    expect(cache.serverNext).toBeUndefined();
+    expect(res.nextCursor).toBeUndefined();
+    expect(res.total).toBe(10);
+  });
+
+  /** Every page empty, every page with a successor — the fill loop needs a ceiling. */
+  function neverEndingClient(): { client: Client; fetches: () => number } {
+    let fetches = 0;
+    const client = {
+      listTools: ((p?: { cursor?: string }) => {
+        fetches++;
+        const n = p?.cursor ? Number(p.cursor) : 0;
+        return Promise.resolve({ tools: [], nextCursor: String(n + 1) });
+      }) as never,
+    } as unknown as Client;
+    return { client, fetches: () => fetches };
+  }
+
+  it("stops at the page cap rather than following a server that never converges", async () => {
+    const { client, fetches } = neverEndingClient();
+    const cache = newPageCache();
+    const res = await listPage(client, "tools", cache);
+    expect(fetches()).toBeLessThanOrEqual(202); // the first fetch plus the 200-page ceiling
+    expect(cache.serverNext).toBeUndefined();
+    expect(res.items).toEqual([]);
+    expect(res.nextCursor).toBeUndefined();
+  });
+});
