@@ -6,7 +6,17 @@
  * credential check — the router's loopback guard is its boundary (see makeAuthed in adminapi.ts).
  */
 
+/**
+ * The auth scheme prefix. Matched case-insensitively, and across any run of spaces, because RFC
+ * 7235 says the scheme token is case-insensitive and separated by one or more SP — a client
+ * sending `bearer <token>` is conformant, and rejecting it looked from the outside like a wrong
+ * token.
+ */
+const BEARER_RE = /^bearer +/i;
+
 /** Pull the `<token>` out of `Authorization: Bearer <token>`, or "" when the header is absent. */
 export function bearerSecret(header: string | undefined): string {
-  return header && header.startsWith("Bearer ") ? header.slice(7) : "";
+  if (!header) return "";
+  const m = BEARER_RE.exec(header);
+  return m ? header.slice(m[0].length).trim() : "";
 }
