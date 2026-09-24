@@ -29,6 +29,13 @@ export interface ProxyOpts {
   remoteCaps?: ServerCapabilities;
 }
 
+/** The client calls a proxy Server forwards to — an SDK Client, or a stand-in answering from a
+ *  list snapshot (see ProcAdapter.makeSnapshotServer). */
+export type ProxyClient = Pick<
+  Client,
+  "listTools" | "callTool" | "listResources" | "readResource" | "listPrompts" | "getPrompt"
+>;
+
 /**
  * Build an MCP Server whose handlers forward every request to an already-connected client.
  *
@@ -36,7 +43,7 @@ export interface ProxyOpts {
  * remote HTTP MCP (`http`). Everything a proxied MCP needs — call logging, the `annotations` strip for
  * older clients, the resource/prompt gates — is the same either way and lives here once.
  */
-export function makeProxyServer(client: Client, opts: ProxyOpts = {}): Server {
+export function makeProxyServer(client: ProxyClient, opts: ProxyOpts = {}): Server {
   const has = (cap: keyof ServerCapabilities): boolean => !opts.remoteCaps || !!opts.remoteCaps[cap];
   const exposeResources = opts.exposeResources !== false && has("resources");
   const exposePrompts = opts.exposePrompts !== false && has("prompts");

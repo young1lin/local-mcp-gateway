@@ -5,6 +5,7 @@ import { isPageCacheStale, type PageCache } from "./paging.js";
 import { log } from "./log.js";
 import { invalidateMemoryCache } from "./mem.js";
 import { clearCalls, forgetCallAlias, renameCalls } from "./calls.js";
+import type { ListCache, ListSnapshot } from "./list-cache.js";
 
 export type Source = "config" | "managed";
 export type Lifecycle = "starting" | "started" | "stopping" | "stopped" | "idle" | "error";
@@ -105,7 +106,38 @@ export class Registry {
    *  normally evicts a stale handler never runs for a name that no longer resolves to an entry. */
   private onEvict?: (name: string) => void;
 
-  constructor(private intervalMs = 15000) {}
+  /** `listCache` lets an idle lazy MCP answer list requests from its last run's snapshot (see
+   *  cachedLists); without one, every request to an idle MCP wakes it, as before. */
+  constructor(private intervalMs = 15000, private listCache?: ListCache) {}
+
+  /** The list snapshot an idle lazy MCP can answer from — only one taken under its current
+   *  definition, so a config edit falls back to waking the child. */
+  cachedLists(name: string): ListSnapshot | undefined {
+    const e = this.entries.get(name);
+    if (!e || !isLazy(e.def) || !e.adapter.makeSnapshotServer) return undefined;
+    return this.listCache?.get(name, e.def);
+  }
+
+  /** Refresh the snapshot from a lazy MCP that just started. Never fails the start: a child that
+   *  cannot list is still a running child, and the next start tries again. */
+  private async snapshotLists(e: RegistryEntry): Promise<void> {
+    const cache = this.listCache;
+    if (!cache || !isLazy(e.def) || !e.adapter.listSnapshot) return;
+    const gen = e.gen;
+    const def = e.def;
+    try {
+      const snapshot = await e.adapter.listSnapshot();
+      if (e.gen !== gen || e.deleted) return; // stopped, restarted or deleted meanwhile
+      const previous = cache.get(e.name, def);
+      cache.set(e.name, def, snapshot);
+      // A client may have listed from the old snapshot while the child was idle; tell it to re-list.
+      if (previous && JSON.stringify(previous) !== JSON.stringify(snapshot)) {
+        void this.notifyToolsChanged(e.name).catch(() => { /* best effort */ });
+      }
+    } catch (err) {
+      log("warn", "list snapshot failed", { name: e.name, err: msg(err) });
+    }
+  }
 
   register(name: string, source: Source, def: ServerDef, adapter: Adapter): RegistryEntry {
     if (this.entries.has(name)) throw new Error(`MCP already registered: ${name}`);
@@ -265,6 +297,7 @@ export class Registry {
       e.toolPage = undefined;
       e.promptPage = undefined;
       this.armIdle(e); // a woken lazy proc starts its idle-reap countdown now
+      void this.snapshotLists(e); // off the start path: the waking request must not wait for it
       log("info", "mcp started", { name, type: e.adapter.type });
       invalidateMemoryCache();
     } catch (err) {
@@ -361,6 +394,7 @@ export class Registry {
     // into a dead half and an empty half.
     await renameCalls(oldName, newName);
     e.adapter.rename?.(newName);
+    this.listCache?.rename(oldName, newName);
   }
 
   /** Remove an MCP, whatever its source: stop it first, then drop the runtime entry and its call
@@ -378,6 +412,7 @@ export class Registry {
     this.entries.delete(name);
     this.onEvict?.(name); // free the cached handler — the POST path won't, for a name that no longer exists
     await clearCalls(name); // nothing left to show it against
+    this.listCache?.delete(name);
     log("info", "mcp deleted", { name, source: e.source });
   }
 

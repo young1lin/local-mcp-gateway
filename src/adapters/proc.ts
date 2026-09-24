@@ -4,7 +4,8 @@ import type { Server } from "@modelcontextprotocol/server";
 import type { Adapter } from "./types.js";
 import { treeKill } from "../process-tree.js";
 import { noteProcPid, dropProcPid } from "../proc-pids.js";
-import { makeProxyServer, type ProxyOpts } from "./proxy.js";
+import { makeProxyServer, type ProxyClient, type ProxyOpts } from "./proxy.js";
+import type { ListSnapshot } from "../list-cache.js";
 import { loginPath } from "../pathenv.js";
 
 /** Cap on retained child stderr. Enough to diagnose a failed launch, small enough to ignore. */
@@ -174,6 +175,35 @@ export class ProcAdapter implements Adapter {
   makeServer(): Server {
     if (!this.client) throw new Error("not started");
     return makeProxyServer(this.client, this.proxyOpts());
+  }
+
+  /** The child's lists as a client would see them, for the list cache. Only what is exposed is
+   *  fetched: a hidden resource list is exactly the one that can run to thousands of entries. */
+  async listSnapshot(): Promise<ListSnapshot> {
+    const client = this.client;
+    if (!client) throw new Error("not started");
+    const caps = client.getServerCapabilities() ?? {};
+    const tools = (await client.listTools()).tools;
+    const prompts = caps.prompts && this.opts.exposePrompts !== false ? (await client.listPrompts()).prompts : undefined;
+    const resources = caps.resources && this.opts.exposeResources !== false
+      ? (await client.listResources()).resources
+      : undefined;
+    return { tools, prompts, resources };
+  }
+
+  /** A proxy Server over the snapshot instead of the child: the same proxyOpts, so capabilities,
+   *  instructions and the tools/list shaping match what a started child's makeServer() answers. */
+  makeSnapshotServer(snapshot: ListSnapshot): Server {
+    const notRunning = (): Promise<never> => Promise.reject(new Error(`MCP '${this.opts.name}' is not started`));
+    const client: ProxyClient = {
+      listTools: async () => ({ tools: snapshot.tools }),
+      listPrompts: async () => ({ prompts: snapshot.prompts ?? [] }),
+      listResources: async () => ({ resources: snapshot.resources ?? [] }),
+      callTool: notRunning,
+      readResource: notRunning,
+      getPrompt: notRunning,
+    };
+    return makeProxyServer(client, this.proxyOpts());
   }
 
   /** The proxy settings for this child, in one place: build() and makeServer() must agree, and a

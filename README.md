@@ -117,6 +117,16 @@ spawns and speaks MCP to over stdio:
 optional — `exposeResources: false` hides a child's thousands of table-schema resources, say. See
 the adapter table above for the lazy-by-default lifecycle (`lazy`, `idleMs`).
 
+Every start of a lazy `proc` records the child's tool, prompt and resource lists in `list-cache.json`
+in the data dir (sealed like every state file). While the MCP is idle, a client's `initialize`,
+`ping` and uncursored `tools/list` / `prompts/list` / `resources/list` are answered from that
+snapshot, so connecting a client — which lists tools at startup — no longer spawns a child it may
+never call; the first `tools/call`, read or paged list does. The snapshot is tied to the definition:
+editing the MCP ignores it until the next start takes a fresh one. That tie covers the definition as
+written, with `${ENV}` references unresolved, so a changed environment value still serves the old
+lists until the child next starts; that start takes a fresh snapshot and, when the lists differ,
+sends connected clients a tools-changed notification so they re-list.
+
 ### Remote MCPs (`http`)
 
 A remote MCP is configured, not launched — where it is, and the headers its key travels in:
