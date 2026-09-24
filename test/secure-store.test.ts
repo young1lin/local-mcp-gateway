@@ -170,6 +170,7 @@ describe("loadConfig over sealed state", () => {
     const { loadConfig, resolveDef } = await import("../src/config.js");
     const cfg = loadConfig(p);
     expect(cfg.token).toBe("tok-9");
+    expect(cfg.tokenFromEnvironment).toBe(false); // the store supplied it, not the environment
     expect((cfg.servers.mysql as Record<string, unknown>).password).toBe("${MYSQL_PASS}"); // a ref at rest
     expect((resolveDef(cfg.servers.mysql) as Record<string, unknown>).password).toBe("mpass-9"); // real only at build
     delete process.env.MYSQL_PASS;
@@ -204,5 +205,23 @@ describe("export / import (the recovery path)", () => {
     } finally {
       rmSync(fresh, { recursive: true, force: true });
     }
+  });
+
+  it("readGatewayToken prefers the environment's token over a legacy managed.json token", async () => {
+    const { readGatewayToken } = await import("../src/daemon.js");
+    writeEnvStore({ LMG_TEST_TOKEN_ENV: "tok-store" });
+    writeSecureJson(join(home, "gateway.config.json"), {
+      port: 19999, host: "127.0.0.1", tokenEnv: "LMG_TEST_TOKEN_ENV", servers: {},
+    });
+    writeSecureJson(join(home, "managed.json"), { token: "tok-managed", mcps: [] });
+    process.env.LMG_TEST_TOKEN_ENV = "tok-env";
+    try {
+      expect(readGatewayToken()).toBe("tok-env");
+    } finally {
+      delete process.env.LMG_TEST_TOKEN_ENV;
+    }
+    expect(readGatewayToken()).toBe("tok-managed");
+    writeSecureJson(join(home, "managed.json"), { mcps: [] });
+    expect(readGatewayToken()).toBe("tok-store");
   });
 });

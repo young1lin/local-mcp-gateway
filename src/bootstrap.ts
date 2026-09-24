@@ -123,9 +123,11 @@ export function ensureFirstRun(): FirstRunReport {
   // Guarantee the token exists, in the sealed env store (the plaintext .env replacement). A
   // generated token means clients configured against it keep working only if it is durable —
   // hence the data dir, not the npx cache. (The panel has no login: the loopback guard is its
-  // boundary, so no password is generated.)
-  const newToken = setEnvDefault("MCP_GATEWAY_TOKEN", randomBytes(24).toString("hex"))
-    ? readEnvStore()["MCP_GATEWAY_TOKEN"]
+  // boundary, so no password is generated.) A token the environment already supplies — a supervisor
+  // injecting it at spawn — is the durable one: nothing is generated and nothing is written.
+  const tokenEnv = configuredTokenEnv();
+  const newToken = !process.env[tokenEnv] && setEnvDefault(tokenEnv, randomBytes(24).toString("hex"))
+    ? readEnvStore()[tokenEnv]
     : undefined;
 
   chmodPrivate(dir, true);
@@ -136,6 +138,18 @@ export function ensureFirstRun(): FirstRunReport {
   const report: FirstRunReport = { dataDir: dir, newToken, migrated, created };
   printReport(report);
   return report;
+}
+
+/** The env var the config names for the token — the seed's name when the config names none. A
+ *  migrated config may use its own name, and seeding MCP_GATEWAY_TOKEN then left it unset. */
+function configuredTokenEnv(): string {
+  try {
+    const name = (readSecureJson<{ tokenEnv?: unknown }>(dataPath("gateway.config.json")) ?? {}).tokenEnv;
+    if (typeof name === "string" && name.trim()) return name;
+  } catch {
+    /* unreadable config — loadConfig reports that properly */
+  }
+  return seedConfig().tokenEnv;
 }
 
 /** The panel URL from the config we just wrote or migrated — never a hardcoded 19999. */

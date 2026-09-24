@@ -135,8 +135,13 @@ async function main() {
 
   // Named per-client tokens, seeded from the existing secret so clients already configured keep
   // authenticating (as the "default" token). A pre-multi-token rotation in managed.json takes
-  // precedence over the .env seed.
-  const tokens = new TokenManager(store, loadManagedToken(dataPath("managed.json")) ?? cfg.token);
+  // precedence over the .env seed. A token the environment supplied wins over both and is never
+  // written to managed.json, so the supervisor that injects it stays its only source.
+  const tokens = new TokenManager(
+    store,
+    loadManagedToken(dataPath("managed.json")) ?? cfg.token,
+    cfg.tokenFromEnvironment ? cfg.token : undefined,
+  );
 
   // Restore the traffic ring's pre-restart tail before the server accepts requests, so the first
   // panel poll sees the history that was there before the restart (see src/traffic.ts).

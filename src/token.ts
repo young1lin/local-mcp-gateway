@@ -12,6 +12,8 @@ export interface PublicToken {
   id: string;
   label: string;
   createdAt: string;
+  /** True for the token the process environment supplies — it can be neither rotated nor revoked. */
+  fromEnvironment: boolean;
 }
 
 /**
@@ -32,6 +34,9 @@ export function pickCopyToken<T extends { id: string; label: string }>(
   }
   return list.find((t) => t.label === "default") ?? list[0];
 }
+
+/** The id (and label) of the token clients configured before multi-token support authenticate with. */
+const DEFAULT_ID = "default";
 
 function safeEq(a: string, b: string): boolean {
   const ga = Buffer.from(a);
@@ -55,16 +60,27 @@ export function newSecret(): string {
  *
  * On first boot the pre-multi-token secret migrates to a "default" token, so clients already
  * configured with the old secret keep authenticating unchanged.
+ *
+ * A secret the process environment supplies (`environmentSecret` — a supervisor injecting the
+ * token at spawn) IS the "default" token on every boot and is never persisted: it replaces any
+ * "default" an earlier run saved, and it cannot be rotated or revoked here, only where it is set.
  */
 export class TokenManager {
   private items: TokenRec[];
 
-  constructor(private store: TokenPersistence, seed?: string) {
+  constructor(private store: TokenPersistence, seed?: string, private environmentSecret?: string) {
     const stored = store.getTokens();
-    if (stored.length) {
+    if (environmentSecret) {
+      this.items = [
+        { id: DEFAULT_ID, label: DEFAULT_ID, secret: environmentSecret, createdAt: "" },
+        ...stored.filter((t) => t.id !== DEFAULT_ID),
+      ];
+      // Drop the default an earlier run saved, so it cannot come back once the variable is unset.
+      if (stored.some((t) => t.id === DEFAULT_ID)) this.persist();
+    } else if (stored.length) {
       this.items = stored;
     } else if (seed) {
-      this.items = [{ id: "default", label: "default", secret: seed, createdAt: "" }];
+      this.items = [{ id: DEFAULT_ID, label: DEFAULT_ID, secret: seed, createdAt: "" }];
       store.saveTokens(this.items); // persist the migration so the seed is stable across restarts
     } else {
       this.items = [];
@@ -78,7 +94,12 @@ export class TokenManager {
 
   /** All tokens, secrets stripped — for the panel and the list API. */
   list(): PublicToken[] {
-    return this.items.map(({ id, label, createdAt }) => ({ id, label, createdAt }));
+    return this.items.map(({ id, label, createdAt }) => ({
+      id,
+      label,
+      createdAt,
+      fromEnvironment: this.fromEnvironment(id),
+    }));
   }
 
   get(id: string): TokenRec | undefined {
@@ -95,26 +116,39 @@ export class TokenManager {
       createdAt: new Date().toISOString(),
     };
     this.items.push(rec);
-    this.store.saveTokens(this.items);
+    this.persist();
     return rec;
   }
 
-  /** Rotate one token's secret (keeps id + label; the old secret stops working immediately). */
+  /** Rotate one token's secret (keeps id + label; the old secret stops working immediately).
+   *  Undefined for an unknown id and for the environment's token (see fromEnvironment). */
   rotate(id: string): TokenRec | undefined {
     const rec = this.get(id);
-    if (!rec) return undefined;
+    if (!rec || this.fromEnvironment(id)) return undefined;
     rec.secret = newSecret();
-    this.store.saveTokens(this.items);
+    this.persist();
     return rec;
   }
 
-  /** Revoke a token. Returns false when no token had that id. */
+  /** Revoke a token. Returns false when no token had that id, and for the environment's token. */
   remove(id: string): boolean {
+    if (this.fromEnvironment(id)) return false;
     const before = this.items.length;
     this.items = this.items.filter((t) => t.id !== id);
     const changed = this.items.length < before;
-    if (changed) this.store.saveTokens(this.items);
+    if (changed) this.persist();
     return changed;
+  }
+
+  /** True for the token the process environment supplies. A rotation here would last only until
+   *  the next boot, so the API refuses it and points at the variable instead. */
+  fromEnvironment(id: string): boolean {
+    return !!this.environmentSecret && id === DEFAULT_ID;
+  }
+
+  /** Save every token except the environment's, which must never reach disk. */
+  private persist(): void {
+    this.store.saveTokens(this.items.filter((t) => !this.fromEnvironment(t.id)));
   }
 }
 
