@@ -59,6 +59,15 @@ describe("admin API", () => {
     expect(add.status).toBe(201);
   });
 
+  it("lists each MCP's recent client count and last use", async () => {
+    const { app, registry } = setup();
+    registry.register("e", "config", { type: "echo" }, echoAdapter);
+    registry.noteActivity("e", "claude-code");
+    const row = (await request(app).get("/api/mcps")).body.mcps.find((m: { name: string }) => m.name === "e");
+    expect(row.clients).toBe(1);
+    expect(typeof row.lastUsedAt).toBe("string");
+  });
+
   it("has no login route to answer — the credential check is gone, not bypassed", async () => {
     const { app } = setup();
     const login = await request(app).post("/api/login").send({ username: "admin", password: "admin" });

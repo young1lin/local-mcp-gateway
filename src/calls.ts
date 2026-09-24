@@ -643,17 +643,22 @@ export function currentCallSource(): string {
 }
 
 /**
- * The client (token label) that authenticated this request, carried across the MCP SDK the same way
- * `via` is — set at the bearer gate for client calls, absent for panel calls (which have no token).
+ * The client (token label, and the token's id) that authenticated this request, carried across the
+ * MCP SDK the same way `via` is — set at the bearer gate for client calls, absent for panel calls
+ * (which have no token). The label is what logs show; the id is the identity, since labels repeat.
  */
-const clientCtx = new AsyncLocalStorage<string>();
+const clientCtx = new AsyncLocalStorage<{ label: string; tokenId?: string }>();
 
-export function withCallClient<T>(client: string, fn: () => T | Promise<T>): Promise<T> {
-  return Promise.resolve(clientCtx.run(client, fn));
+export function withCallClient<T>(client: string, fn: () => T | Promise<T>, tokenId?: string): Promise<T> {
+  return Promise.resolve(clientCtx.run({ label: client, tokenId }, fn));
 }
 
 export function currentCallClient(): string | undefined {
-  return clientCtx.getStore();
+  return clientCtx.getStore()?.label;
+}
+
+export function currentCallTokenId(): string | undefined {
+  return clientCtx.getStore()?.tokenId;
 }
 
 /**

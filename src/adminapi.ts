@@ -430,6 +430,9 @@ export function mountAdminApi(
         lastCheck: e.lastCheck,
         reason: e.lifecycle === "error" ? e.error : e.lastError,
         startedAt: e.startedAt,
+        // Who is using it: the last client request, and how many clients sent one recently.
+        lastUsedAt: e.lastUsedAt,
+        clients: registry.clientCount(e),
         // The sidebar group. Always a real name — an unassigned MCP answers "default".
         group: store.groupOf(e.name),
       }))

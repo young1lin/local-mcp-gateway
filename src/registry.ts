@@ -27,6 +27,11 @@ export function isLazy(def: ServerDef): boolean {
 /** How long a woken lazy proc stays up with no traffic before its child is reaped. 0 disables. */
 const DEFAULT_IDLE_MS = 600_000;
 
+/** How recently a client must have sent a request to count as one of an MCP's clients. The gateway
+ *  is stateless HTTP — no session outlives a request — so "connected" can only mean "seen lately".
+ *  The same window as the idle reaper: a client quieter than that would not keep a lazy child up. */
+export const CLIENT_WINDOW_MS = DEFAULT_IDLE_MS;
+
 /**
  * The SDK's server-change notifier — `createMcpHandler`'s `notify`. Each method publishes one change
  * kind onto the handler's internal event bus, and the handler's persistent `listenRouter` fans it out
@@ -73,6 +78,10 @@ export interface RegistryEntry {
    *  refuses to build on a tombstoned entry, so a server built after the delete cannot leak
    * outside the registry with no entry left to close it (see delete). */
   deleted?: boolean;
+  /** When a client request last reached this MCP (any method). Survives stop and restart. */
+  lastUsedAt?: string;
+  /** Client identity (the token id — labels can repeat) -> when it last sent a request, in epoch ms. */
+  clientSeen?: Map<string, number>;
 }
 
 /** A flat row for the dashboard / API, with a resolved display state. */
@@ -87,6 +96,9 @@ export interface StatusRow {
   lastCheck?: string;
   reason?: string;
   startedAt?: string;
+  lastUsedAt?: string;
+  /** Distinct clients that sent a request within CLIENT_WINDOW_MS (see Registry.clientCount). */
+  clients: number;
 }
 
 function msg(err: unknown): string {
@@ -220,10 +232,32 @@ export class Registry {
   /**
    * Note that this MCP just served traffic, pushing a lazy proc's idle-reap deadline back. Cheap
    * and safe on every type: it only arms a timer for an entry that is running AND lazy.
+   *
+   * `tokenId` is who sent it (the id of the token it authenticated with) — what `clients` in the
+   * status counts.
    */
-  noteActivity(name: string): void {
+  noteActivity(name: string, tokenId?: string, now = Date.now()): void {
     const e = this.entries.get(name);
-    if (e && e.server) this.armIdle(e); // no-op unless lazy (the guard lives there, once)
+    if (!e) return;
+    e.lastUsedAt = new Date(now).toISOString();
+    if (tokenId) {
+      if (!e.clientSeen) e.clientSeen = new Map();
+      e.clientSeen.set(tokenId, now);
+    }
+    if (e.server) this.armIdle(e); // no-op unless lazy (the guard lives there, once)
+  }
+
+  /**
+   * How many distinct clients sent this MCP a request within CLIENT_WINDOW_MS. Identity is the token
+   * a request authenticated with — the stateless gateway has no session id — so two sessions sharing
+   * one token count once. Older sightings are dropped here, which keeps the map bounded.
+   */
+  clientCount(e: RegistryEntry, now = Date.now()): number {
+    if (!e.clientSeen) return 0;
+    for (const [client, at] of e.clientSeen) {
+      if (now - at > CLIENT_WINDOW_MS) e.clientSeen.delete(client);
+    }
+    return e.clientSeen.size;
   }
 
   /** (Re)arm the idle-reap timer for a RUNNING LAZY MCP. `idleMs: 0` opts out entirely.
@@ -462,6 +496,8 @@ export class Registry {
       lastCheck: e.lastCheck,
       reason: e.lifecycle === "error" ? e.error : e.lastError,
       startedAt: e.startedAt,
+      lastUsedAt: e.lastUsedAt,
+      clients: this.clientCount(e),
     }));
   }
 

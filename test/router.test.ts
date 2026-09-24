@@ -56,6 +56,45 @@ describe("router plumbing (echo adapter)", () => {
     expect(parseMcp(call).result?.content?.[0]?.text).toBe("hi");
   });
 
+  it("attributes each request to its token for the status's client count and last use", async () => {
+    const reg = await echoRegistry();
+    const tokens = singleTokenManager(TOKEN);
+    const second = tokens.create("codex").secret;
+    const app = buildApp(reg, tokens);
+    expect(reg.status()[0]).toMatchObject({ clients: 0, lastUsedAt: undefined });
+
+    for (const secret of [TOKEN, second, TOKEN]) {
+      const res = await request(app).post("/echo").set("Authorization", `Bearer ${secret}`).set("Accept", ACCEPT)
+        .send(mcp("tools/list"));
+      expect(res.status).toBe(200);
+    }
+    const row = reg.status()[0];
+    expect(row.clients).toBe(2);
+    expect(Date.now() - Date.parse(row.lastUsedAt!)).toBeLessThan(60_000);
+  });
+
+  it("counts two tokens that share a label as two clients", async () => {
+    const reg = await echoRegistry();
+    const tokens = singleTokenManager(TOKEN);
+    const secrets = [tokens.create("laptop").secret, tokens.create("laptop").secret];
+    const app = buildApp(reg, tokens);
+    for (const secret of secrets) {
+      const res = await request(app).post("/echo").set("Authorization", `Bearer ${secret}`).set("Accept", ACCEPT)
+        .send(mcp("tools/list"));
+      expect(res.status).toBe(200);
+    }
+    expect(reg.status()[0].clients).toBe(2);
+  });
+
+  it("does not count a request refused because the MCP is stopped as use", async () => {
+    const reg = await echoRegistry();
+    await reg.stop("echo");
+    const app = buildApp(reg, singleTokenManager(TOKEN));
+    const res = await request(app).post("/echo").set("Authorization", `Bearer ${TOKEN}`).send(mcp("tools/list"));
+    expect(res.status).toBe(503);
+    expect(reg.status()[0]).toMatchObject({ clients: 0, lastUsedAt: undefined });
+  });
+
   it("returns 503 for an unknown path", async () => {
     const app = buildApp(await echoRegistry(), singleTokenManager(TOKEN));
     const res = await request(app).post("/nope").set("Authorization", `Bearer ${TOKEN}`).send(mcp("tools/list"));

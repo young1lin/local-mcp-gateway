@@ -7,7 +7,7 @@ import type { Registry, RegistryEntry } from "./registry.js";
 import type { ManagedStore } from "./managed.js";
 import type { TokenManager } from "./token.js";
 import { recordTraffic, recordBusEvent } from "./traffic.js";
-import { withCallClient, currentCallClient } from "./calls.js";
+import { withCallClient, currentCallClient, currentCallTokenId } from "./calls.js";
 import { makeAuthed, mountAdminApi } from "./adminapi.js";
 import { mountTunnelApi } from "./tunnels/api.js";
 import type { TunnelManager } from "./tunnels/manager.js";
@@ -96,7 +96,7 @@ export function buildApp(
     const wrapped: Handler = (req, res) => {
       const rec = tokens.verify(bearerSecret(header(req, "authorization")));
       if (!rec) return jsonError(res, 401, "Unauthorized");
-      return withCallClient(rec.label, () => h(req, res));
+      return withCallClient(rec.label, () => h(req, res), rec.id);
     };
     // Refuse an unknown token before the router reads the request body — an MCP POST can carry up
     // to BODY_LIMIT, and none of it needs to be read to know the caller cannot be served. The check
@@ -231,12 +231,14 @@ export function buildApp(
         return;
       }
     }
-    registry.noteActivity(name); // served traffic pushes a lazy proc's idle-reap deadline back
     const node = nodeHandlerFor(entry);
     if (!node) {
       jsonError(res, 503, `MCP '${name}' is not started (state: ${entry.lifecycle})`);
       return;
     }
+    // Served traffic pushes a lazy proc's idle-reap deadline back, and records which token used it
+    // when. A refused request above is not use.
+    registry.noteActivity(name, currentCallTokenId());
     const respText = captureResponse(res);
     try {
       await node(req, res, req.body);

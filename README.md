@@ -404,6 +404,12 @@ lmg open           # open the panel in a browser
 lmg skill install  # copy the shipped AI skill where AI tools discover it
 ```
 
+`lmg status` lists each MCP with its state, health latency and — once a client has used it — how
+many clients sent it a request in the last ten minutes and when the last one arrived
+(`2 clients, used 4m ago`; `clients` and `lastUsedAt` in `--json`). The gateway is stateless HTTP
+with no sessions, so a client is identified by the token it authenticates with: two sessions sharing
+one token count once. Give each client its own token (the panel's **Token** sheet) to tell them apart.
+
 `lmg skill install` copies the package's skill (`.agents/skills/local-mcp-gateway/`) into
 `~/.agents/skills/`, `~/.claude/skills/` and `~/.cursor/skills/` — user-level directories those
 tools scan. The skill is opt-in (`disable-model-invocation`): it loads only when you invoke it.
