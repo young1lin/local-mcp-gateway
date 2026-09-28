@@ -57,6 +57,17 @@ export type StopResult =
   | { status: "not-running"; port: number }
   | { status: "refused"; pid: number; port: number; reason: string };
 
+/** The slice of an /api/mcps row that `lmg status` reports. */
+export interface McpStatusRow {
+  name?: string;
+  state?: string;
+  latencyMs?: number;
+  /** When a client request last reached this MCP. */
+  lastUsedAt?: string;
+  /** Distinct clients (by token) that sent it a request in the last ten minutes. */
+  clients?: number;
+}
+
 export interface StatusResult {
   running: boolean;
   port: number;
@@ -66,7 +77,7 @@ export interface StatusResult {
   uptimeMs?: number;
   url?: string;
   logFile: string;
-  health?: { ok?: boolean; paths?: string[]; health?: unknown[] };
+  health?: { ok?: boolean; paths?: string[]; health?: McpStatusRow[] };
   memory?: { gatewayMb?: number; childrenMb?: number; processCount?: number };
 }
 
@@ -457,7 +468,7 @@ export async function daemonStatus(opts: { port?: number; fetchFn?: typeof fetch
   const live = await getJson<{ ok?: boolean }>(port, "/health", fetchFn);
   if (!live?.ok) return base;
 
-  const listed = await getJson<{ mcps?: Array<{ name?: string; state?: string; latencyMs?: number }> }>(
+  const listed = await getJson<{ mcps?: McpStatusRow[] }>(
     port, "/api/mcps", fetchFn, readGatewayToken(),
   );
   return {

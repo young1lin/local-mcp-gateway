@@ -250,6 +250,24 @@ describe("run", () => {
     expect(text).toContain("82.7");
   });
 
+  it("shows each MCP's recent clients and last use, and nothing for one never used", async () => {
+    const o = io();
+    const status: StatusResult = {
+      ...RUNNING,
+      health: {
+        ok: true,
+        health: [
+          { name: "mysql", state: "up", latencyMs: 110, clients: 2, lastUsedAt: new Date(Date.now() - 240_000).toISOString() },
+          { name: "redis", state: "idle" },
+        ],
+      },
+    };
+    expect(await run(["status"], o, ops({ status }))).toBe(0);
+    const lines = o.text().split("\n");
+    expect(lines.find((l) => l.includes("mysql") && l.includes("ms"))).toMatch(/110 ms\s+2 clients, used 4m ago/);
+    expect(lines.find((l) => l.includes("redis") && l.includes("idle"))).not.toMatch(/client/);
+  });
+
   it("exits 3 from status when nothing is running", async () => {
     const o = io();
     expect(await run(["status"], o, ops({ status: STOPPED }))).toBe(3);

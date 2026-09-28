@@ -15,6 +15,7 @@ import {
   urlFor,
   persistListenPort,
   type StartOptions,
+  type McpStatusRow,
   type StartResult,
   type StatusResult,
   type StopOptions,
@@ -221,7 +222,7 @@ function row(label: string, value: string): string {
   return `  ${label.padEnd(9)}${value}`;
 }
 
-function renderStatus(st: StatusResult): string {
+function renderStatus(st: StatusResult, now = Date.now()): string {
   const lines = ["gateway running", row("url", st.url ?? urlFor(st.port))];
   if (st.pid !== undefined) {
     lines.push(row("pid", `${st.pid}${st.uptimeMs === undefined ? "" : `   (up ${fmtDuration(st.uptimeMs)})`}`));
@@ -233,7 +234,7 @@ function renderStatus(st: StatusResult): string {
   }
   lines.push(row("log", st.logFile));
 
-  const entries = (st.health?.health ?? []) as { name?: string; state?: string; latencyMs?: number }[];
+  const entries = st.health?.health ?? [];
   if (entries.length) {
     const counts = new Map<string, number>();
     for (const e of entries) counts.set(e.state ?? "?", (counts.get(e.state ?? "?") ?? 0) + 1);
@@ -241,10 +242,19 @@ function renderStatus(st: StatusResult): string {
     const width = Math.max(...entries.map((e) => (e.name ?? "").length));
     for (const e of entries) {
       const latency = e.latencyMs === undefined ? "" : `${e.latencyMs} ms`;
-      lines.push(`    ${(e.name ?? "").padEnd(width)}  ${(e.state ?? "?").padEnd(8)}${latency}`);
+      const usage = usageOf(e, now);
+      lines.push(`    ${(e.name ?? "").padEnd(width)}  ${(e.state ?? "?").padEnd(8)}${usage ? latency.padEnd(9) + usage : latency}`);
     }
   }
   return lines.join("\n");
+}
+
+/** "2 clients, used 4m ago" — empty for an MCP no client has used since the gateway started. */
+function usageOf(e: McpStatusRow, now: number): string {
+  const last = e.lastUsedAt === undefined ? NaN : Date.parse(e.lastUsedAt);
+  if (!Number.isFinite(last)) return "";
+  const n = e.clients ?? 0;
+  return `${n} ${n === 1 ? "client" : "clients"}, used ${fmtDuration(Math.max(0, now - last))} ago`;
 }
 
 /**

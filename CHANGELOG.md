@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `lmg status` (text and `--json`) and `GET /api/mcps` report, per MCP, `lastUsedAt` — when a client
+  request last reached it — and `clients`, the number of distinct tokens that sent it a request in
+  the last ten minutes.
+
 ## [0.1.0] - 2026-08-18
 
 Initial public release.

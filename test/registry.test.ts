@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { Registry } from "../src/registry.js";
+import { CLIENT_WINDOW_MS, Registry } from "../src/registry.js";
 import { echoAdapter } from "../src/adapters/echo.js";
 import type { Adapter } from "../src/adapters/types.js";
 import type { Server } from "@modelcontextprotocol/server";
@@ -205,6 +205,36 @@ describe("Registry health probing", () => {
     // and nothing resets lastError for a stopped entry, so it would have stuck until a restart.
     expect(r.get("a")!.lastError).toBeUndefined();
     expect(r.get("a")!.status).toBe("unknown");
+  });
+});
+
+describe("Registry client usage", () => {
+  it("records the last use and counts distinct recent clients per MCP", async () => {
+    const r = reg();
+    r.register("a", "managed", { type: "fake" }, fakeAdapter());
+    r.register("b", "managed", { type: "fake" }, fakeAdapter());
+    const t0 = Date.parse("2026-09-24T10:00:00.000Z");
+    r.noteActivity("a", "claude-code", t0);
+    r.noteActivity("a", "codex", t0 + 1000);
+    r.noteActivity("a", "claude-code", t0 + 2000); // the same client again counts once
+
+    const a = r.get("a")!;
+    expect(a.lastUsedAt).toBe("2026-09-24T10:00:02.000Z");
+    expect(r.clientCount(a, t0 + 3000)).toBe(2);
+    // Only the MCP that saw the traffic reports it.
+    expect(r.status().find((s) => s.name === "b")).toMatchObject({ clients: 0, lastUsedAt: undefined });
+  });
+
+  it("forgets a client once it has been quiet longer than the window, but keeps the last use", async () => {
+    const r = reg();
+    r.register("a", "managed", { type: "fake" }, fakeAdapter());
+    const t0 = Date.parse("2026-09-24T10:00:00.000Z");
+    r.noteActivity("a", "claude-code", t0);
+    r.noteActivity("a", "codex", t0 + CLIENT_WINDOW_MS);
+    const a = r.get("a")!;
+    expect(r.clientCount(a, t0 + CLIENT_WINDOW_MS + 1)).toBe(1);
+    expect(r.clientCount(a, t0 + 2 * CLIENT_WINDOW_MS + 1)).toBe(0);
+    expect(a.lastUsedAt).toBe(new Date(t0 + CLIENT_WINDOW_MS).toISOString());
   });
 });
 
