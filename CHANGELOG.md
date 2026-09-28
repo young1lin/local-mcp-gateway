@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- An idle lazy `proc` answers `initialize`, `ping` and uncursored `tools/list`, `prompts/list` and
+  `resources/list` from the lists its child reported on its last start (sealed `list-cache.json` in
+  the data dir, invalidated by any change to the definition), and spawns the child only for the
+  first request that needs it — a tool call, a read, a paged list. A start whose lists differ from
+  the snapshot sends a tools-changed notification, so clients re-list.
+
 ## [0.1.0] - 2026-08-18
 
 Initial public release.

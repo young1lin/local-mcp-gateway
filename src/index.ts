@@ -18,6 +18,7 @@ import { registryView } from "./tunnels/mcpmatch.js";
 import { ensureFirstRun } from "./bootstrap.js";
 import { dataPath } from "./datadir.js";
 import { loginPath } from "./pathenv.js";
+import { ListCache } from "./list-cache.js";
 
 async function main() {
   // A detached `lmg start` (and Cursor's agent shell) often inherit a PATH that is missing
@@ -51,7 +52,8 @@ async function main() {
     }
   }
 
-  const registry = new Registry(15000);
+  // Idle lazy MCPs answer the handshake and their lists from the last run's snapshot (list-cache.ts).
+  const registry = new Registry(15000, new ListCache(dataPath("list-cache.json")));
   const store = new ManagedStore(dataPath("managed.json"));
 
   // Tunnels come up before the MCPs are registered because several MCPs connect through them, and

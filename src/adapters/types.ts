@@ -1,5 +1,6 @@
 import type { Server } from "@modelcontextprotocol/server";
 import type { DbBrowser, MongoBrowser, RedisBrowser } from "../dbbrowser.js";
+import type { ListSnapshot } from "../list-cache.js";
 
 export interface Adapter {
   readonly type: string;
@@ -30,6 +31,13 @@ export interface Adapter {
   /** Live, shared resources on/off — the master switch, mirrored from the per-tool toggle. Optional;
    *  absent on adapters that do not own a static resource set. */
   resourceToggle?: { on: boolean };
+  /** Capture the running server's tool/prompt/resource lists, so a lazy MCP can answer them from the
+   *  list cache after it went idle. Optional (proc only). Throws when not started. */
+  listSnapshot?(): Promise<ListSnapshot>;
+  /** A request-handling Server that answers the list requests from `snapshot` alone, without the
+   *  child — the same capabilities and list shaping as makeServer. Anything else it is asked for
+   *  fails, so the router sends only list requests its way. Optional (proc only). */
+  makeSnapshotServer?(snapshot: ListSnapshot): Server;
   /** Root PIDs of any spawned subtree, so the memory view knows what to measure. Optional (proc only);
    *  an adapter that returns nothing has no child process, and measuring can be skipped entirely. */
   pids?(): number[];

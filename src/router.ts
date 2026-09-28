@@ -4,6 +4,7 @@ import { createMcpHandler, type Server } from "@modelcontextprotocol/server";
 import { bearerSecret } from "./auth.js";
 import { log } from "./log.js";
 import type { Registry, RegistryEntry } from "./registry.js";
+import type { ListSnapshot } from "./list-cache.js";
 import type { ManagedStore } from "./managed.js";
 import type { TokenManager } from "./token.js";
 import { recordTraffic, recordBusEvent } from "./traffic.js";
@@ -25,6 +26,25 @@ function jsonError(res: Res, status: number, message: string) {
   // be reported in-band, but the response still has to be closed — dropping it here left the client
   // holding an open stream until its own timeout. Matches Router.dispatch's own catch-all.
   res.end();
+}
+
+/** The requests a list snapshot can answer: the handshake, and the uncursored lists. Anything else —
+ *  a call, a read, a cursor into a later page, a subscriptions/listen stream — needs the child. */
+const SNAPSHOT_METHODS = new Set([
+  "initialize", "server/discover", "ping", "tools/list", "prompts/list", "resources/list",
+]);
+
+/** True when every JSON-RPC message in the body can be answered from a list snapshot. */
+export function answerableFromSnapshot(body: unknown): boolean {
+  const msgs = Array.isArray(body) ? body : [body];
+  if (!msgs.length) return false;
+  return msgs.every((m) => {
+    if (!m || typeof m !== "object") return false;
+    const { method, params } = m as { method?: unknown; params?: { cursor?: unknown } };
+    if (typeof method !== "string") return false;
+    if (method.startsWith("notifications/")) return true; // e.g. notifications/initialized — no reply
+    return SNAPSHOT_METHODS.has(method) && (params?.cursor === undefined || params.cursor === "");
+  });
 }
 
 /**
@@ -133,11 +153,46 @@ export function buildApp(
   // runs for a name that no longer resolves. The registry calls this back so the handler is closed and
   // dropped — closing it also tears down any subscriptions/listen stream still held on the old name.
   registry.setEvictor((name) => {
+    const cold = coldHandlers.get(name);
+    if (cold) { coldHandlers.delete(name); void cold.handler.close().catch(() => {}); }
     const h = handlers.get(name);
     if (!h) return;
     handlers.delete(name);
     void h.handler.close().catch(() => { /* best effort */ });
   });
+
+  /**
+   * Handlers that answer an IDLE lazy MCP's list requests from its cached snapshot, so a client that
+   * connects and lists tools — every client does, at startup — does not spawn a child it may never
+   * call. One per MCP, rebuilt when the snapshot or the adapter changes.
+   */
+  interface ColdHandler {
+    snapshot: ListSnapshot;
+    adapter: RegistryEntry["adapter"];
+    handler: ReturnType<typeof createMcpHandler>;
+    node: NodeMcpRequestHandler;
+  }
+  const coldHandlers = new Map<string, ColdHandler>();
+
+  function coldNodeHandlerFor(entry: RegistryEntry, body: unknown): NodeMcpRequestHandler | undefined {
+    if (!answerableFromSnapshot(body)) return undefined;
+    const snapshot = registry.cachedLists(entry.name);
+    const adapter = entry.adapter;
+    const makeSnapshotServer = adapter.makeSnapshotServer?.bind(adapter);
+    if (!snapshot || !makeSnapshotServer) return undefined;
+    const cached = coldHandlers.get(entry.name);
+    if (cached && cached.snapshot === snapshot && cached.adapter === adapter) return cached.node;
+    if (cached) void cached.handler.close().catch(() => {});
+    const handler = createMcpHandler(() => makeSnapshotServer(snapshot), {
+      legacy: "stateless",
+      onerror: (e) => log("warn", "mcp handler error", { name: entry.name, err: e.message }),
+    });
+    const node = toNodeHandler(handler, {
+      onerror: (e) => log("warn", "mcp adapter error", { name: entry.name, err: e.message }),
+    });
+    coldHandlers.set(entry.name, { snapshot, adapter, handler, node });
+    return node;
+  }
 
   function nodeHandlerFor(entry: RegistryEntry): NodeMcpRequestHandler | undefined {
     if (!entry.server) {
@@ -220,10 +275,13 @@ export function buildApp(
     const name = req.params.path;
     const entry = registry.get(name);
     if (!entry) { jsonError(res, 503, `Unknown MCP path: ${name}`); return; }
+    // An idle lazy MCP whose lists were cached on its last run answers the handshake and the lists
+    // from that snapshot; the child is spawned by the first request that needs it.
+    const cold = entry.lifecycle === "idle" ? coldNodeHandlerFor(entry, req.body) : undefined;
     // A lazy proc idle at boot (or reaped since): this request is the wakeup. The await IS the
     // contract — the client's request waits for the spawn and then gets served by it, bounded by
     // the adapter's own start timeout, because AI clients do not retry a 503 helpfully.
-    if (entry.lifecycle === "idle") {
+    if (!cold && entry.lifecycle === "idle") {
       try {
         await registry.ensureStarted(name);
       } catch (err) {
@@ -232,7 +290,7 @@ export function buildApp(
       }
     }
     registry.noteActivity(name); // served traffic pushes a lazy proc's idle-reap deadline back
-    const node = nodeHandlerFor(entry);
+    const node = cold ?? nodeHandlerFor(entry);
     if (!node) {
       jsonError(res, 503, `MCP '${name}' is not started (state: ${entry.lifecycle})`);
       return;
