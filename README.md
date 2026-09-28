@@ -308,6 +308,15 @@ agent to run, rather than pointing it at `.env`, which holds your database passw
 can also be viewed, copied and rotated from the panel's **Token** button; rotation persists to
 `managed.json` and takes effect without a restart.
 
+When the token's variable (`tokenEnv`, `MCP_GATEWAY_TOKEN` by default) is already set in the
+gateway's process environment — a service manager or a wrapper injecting it at spawn — that value is
+the `default` token on every boot and is never written anywhere: nothing is generated, it is not
+saved to `managed.json`, and the panel refuses to rotate or revoke it (change the variable instead).
+`${ENV}` references resolve from the process environment before the stored values, so such a
+supervisor can supply every credential without the gateway storing any of them. The daemon inherits
+the environment of whatever starts it, so `lmg restart` from a shell without the variable starts it
+without the environment token.
+
 The panel itself has **no login**: the gateway answers loopback requests only, so reaching it at all
 already means you are on the machine it serves. The bearer token remains the gate for MCP endpoints —
 it is what AI clients authenticate with.

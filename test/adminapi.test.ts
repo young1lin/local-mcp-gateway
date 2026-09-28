@@ -243,6 +243,7 @@ describe("admin API", () => {
     const list0 = await request(app).get("/api/tokens").set(auth);
     expect(list0.status).toBe(200);
     expect(list0.body.tokens.map((t: { label: string }) => t.label)).toContain("default");
+    expect(list0.body.tokens.every((t: { fromEnvironment: boolean }) => t.fromEnvironment === false)).toBe(true);
     expect(JSON.stringify(list0.body.tokens)).not.toContain(TOKEN);
 
     // Create a named token; its secret comes back once and authenticates an MCP request.
@@ -269,6 +270,30 @@ describe("admin API", () => {
 
     // Persisted: a fresh read has the default token (the created one was revoked).
     expect(new ManagedStore(path).getTokens().map((t) => t.label)).toEqual(["default"]);
+  });
+
+  it("refuses to rotate or revoke the token the environment supplies, and never saves it", async () => {
+    const path = join(tmpdir(), `mcp-managed-test-${process.pid}-${counter++}.json`);
+    rmSync(path, { force: true });
+    const registry = new Registry(60000);
+    registries.push(registry);
+    const store = new ManagedStore(path);
+    const app = buildApp(registry, new TokenManager(store, TOKEN, TOKEN), store, "LMG_TEST_TOKEN");
+
+    const list = await request(app).get("/api/tokens");
+    expect(list.body.tokens).toEqual([expect.objectContaining({ id: "default", fromEnvironment: true })]);
+
+    const rot = await request(app).post("/api/tokens/default/rotate");
+    expect(rot.status).toBe(409);
+    expect(rot.body.error).toContain("LMG_TEST_TOKEN");
+    expect((await request(app).delete("/api/tokens/default")).status).toBe(409);
+    expect((await request(app).post("/anything").set("Authorization", `Bearer ${TOKEN}`)).status).toBe(503);
+
+    // Other tokens still persist; the environment's never does.
+    expect((await request(app).post("/api/tokens").send({ label: "codex" })).status).toBe(201);
+    const saved = new ManagedStore(path).getTokens();
+    expect(saved.map((t) => t.label)).toEqual(["codex"]);
+    expect(readFileSync(path, "utf8")).not.toContain(TOKEN);
   });
 
   it("records MCP traffic attributed to the token and the client's self-reported name", async () => {

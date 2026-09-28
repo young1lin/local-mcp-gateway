@@ -37,13 +37,16 @@ function paintTokens() {
   var inUse = pickCopyToken(list, rememberedTokenId());
   var rows = list.length ? list.map(function (t) {
     var mine = inUse && t.id === inUse.id;
+    // The environment's token changes only where its variable is set, so both actions stay off.
+    var locked = t.fromEnvironment ? ' disabled title="Set by an environment variable — change it there"' : '';
     return '<div class="row"><div class="row-main">' +
-      '<div class="name">' + esc(t.label) + (mine ? ' <span class="tag">copies use this</span>' : '') + '</div>' +
+      '<div class="name">' + esc(t.label) + (mine ? ' <span class="tag">copies use this</span>' : '') +
+        (t.fromEnvironment ? ' <span class="tag">from environment</span>' : '') + '</div>' +
       '<div class="desc">id ' + esc(t.id) + (t.createdAt ? ' · created ' + new Date(t.createdAt).toLocaleString() : '') + '</div>' +
       '</div><div class="row-act">' +
         (mine ? '' : '<button class="btn" data-tkuse="' + esc(t.id) + '">Use</button> ') +
-        '<button class="btn" data-tkrot="' + esc(t.id) + '">Rotate</button> ' +
-        '<button class="btn danger" data-tkdel="' + esc(t.id) + '">Revoke</button>' +
+        '<button class="btn" data-tkrot="' + esc(t.id) + '"' + locked + '>Rotate</button> ' +
+        '<button class="btn danger" data-tkdel="' + esc(t.id) + '"' + locked + '>Revoke</button>' +
       '</div></div>';
   }).join("") : '<div class="row"><span class="rowmsg">No tokens.</span></div>';
   var secret = state.tokenViewSecret;

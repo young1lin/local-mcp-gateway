@@ -44,6 +44,9 @@ export interface GatewayConfig {
   token: string;
   /** Name of the env var the token came from. Safe to show — it is what client configs should read. */
   tokenEnv: string;
+  /** True when the token was already in the process environment before the sealed env store was
+   *  injected — a supervisor or service manager supplied it. Such a token is never persisted. */
+  tokenFromEnvironment: boolean;
   servers: Record<string, ServerDef>;
 }
 
@@ -114,11 +117,14 @@ export function resolveDef(def: ServerDef): ServerDef {
 }
 
 export function loadConfig(path = dataPath("gateway.config.json")): GatewayConfig {
+  const raw = readSecureJson<Record<string, unknown>>(path);
+  // Whether the environment supplied the token has to be read BEFORE the store is injected below —
+  // afterwards a stored token and an inherited one look the same.
+  const tokenFromEnvironment = typeof raw?.tokenEnv === "string" && !!process.env[raw.tokenEnv];
   // The sealed env store (where bootstrap seeds the token) replaces the old plaintext .env: its
   // values land in process.env here, never overriding what the environment already set, so the
   // `${ENV_VAR}` build-time expansion keeps resolving exactly as before.
   injectEnvStore();
-  const raw = readSecureJson<Record<string, unknown>>(path);
   if (raw === undefined) {
     throw new Error(`${path}: no config file — run 'lmg start' once (it seeds one) or 'lmg import' a backup`);
   }
@@ -152,5 +158,5 @@ export function loadConfig(path = dataPath("gateway.config.json")): GatewayConfi
   for (const [name, def] of Object.entries(raw.servers)) {
     servers[name] = def as ServerDef; // kept unresolved on purpose — see resolveDef()
   }
-  return { port: resolvePort(raw.port), host, token, tokenEnv: String(raw.tokenEnv), servers };
+  return { port: resolvePort(raw.port), host, token, tokenEnv: String(raw.tokenEnv), tokenFromEnvironment, servers };
 }

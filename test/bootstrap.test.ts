@@ -36,6 +36,7 @@ describe("ensureFirstRun", () => {
     home = join(mkdtempSync(join(tmpdir(), "mcpgw-parent-")), "new-home");
     process.chdir(cwd);
     process.env.MCP_GATEWAY_HOME = home;
+    delete process.env.MCP_GATEWAY_TOKEN;
     vi.spyOn(console, "log").mockImplementation(() => {});
   });
 
@@ -43,7 +44,27 @@ describe("ensureFirstRun", () => {
     process.chdir(origCwd);
     delete process.env.MCP_GATEWAY_HOME;
     delete process.env.MCP_GATEWAY_PORT;
+    delete process.env.MCP_GATEWAY_TOKEN;
+    delete process.env.LMG_CUSTOM_TOKEN;
     vi.restoreAllMocks();
+  });
+
+  it("neither generates nor stores a token the environment already supplies", () => {
+    process.env.MCP_GATEWAY_TOKEN = "from-supervisor";
+    const r = ensureFirstRun();
+    expect(r.newToken).toBeUndefined();
+    expect(readEnvStore()["MCP_GATEWAY_TOKEN"]).toBeUndefined();
+  });
+
+  it("seeds the token under the env var a migrated config names", () => {
+    writeFileSync(
+      join(cwd, "gateway.config.json"),
+      JSON.stringify({ port: 19999, host: "127.0.0.1", tokenEnv: "LMG_CUSTOM_TOKEN", servers: {} }),
+    );
+    const r = ensureFirstRun();
+    expect(r.newToken).toBeTruthy();
+    expect(readEnvStore()["LMG_CUSTOM_TOKEN"]).toBe(r.newToken);
+    expect(readEnvStore()["MCP_GATEWAY_TOKEN"]).toBeUndefined();
   });
 
   it("creates the data dir, seeds a SEALED config, and puts the token in the sealed env store", () => {

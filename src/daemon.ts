@@ -131,8 +131,9 @@ export function isNpxCachePath(path: string): boolean {
   return /[\\/]_npx[\\/]/.test(path);
 }
 
-/** The token a client needs for the authenticated endpoints. Precedence mirrors index.ts: a
- *  rotation persisted in managed.json wins over the .env seed. Read as data, not through the
+/** The token a client needs for the authenticated endpoints. Precedence mirrors index.ts: the
+ *  process environment's token wins, then a rotation persisted in managed.json, then the sealed
+ *  store. Read as data, not through the
  *  managed store, to keep the CLI free of the server's module graph. */
 function readEnvKey(key: string): string | undefined {
   if (process.env[key]) return process.env[key];
@@ -145,13 +146,14 @@ function readEnvKey(key: string): string | undefined {
 }
 
 export function readGatewayToken(): string | undefined {
+  const name = typeof readConfigRaw()?.tokenEnv === "string" ? String(readConfigRaw()!.tokenEnv) : "MCP_GATEWAY_TOKEN";
+  if (process.env[name]) return process.env[name];
   try {
     const m = readSecureJson<{ token?: unknown }>(dataPath("managed.json"));
     if (typeof m?.token === "string" && m.token) return m.token;
   } catch {
     /* no managed.json yet, or not decryptable here */
   }
-  const name = typeof readConfigRaw()?.tokenEnv === "string" ? String(readConfigRaw()!.tokenEnv) : "MCP_GATEWAY_TOKEN";
   return readEnvKey(name);
 }
 

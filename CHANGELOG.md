@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- A token already present in the process environment (the config's `tokenEnv`) is used as the
+  `default` token on every boot and never persisted: first run no longer generates and stores a
+  second one, it is no longer copied into `managed.json` (where it used to outlive a change of the
+  variable), a `default` an earlier run saved is dropped, the token API answers 409 to rotating or
+  revoking it (the panel greys both out), and `lmg token` / `lmg creds` print it ahead of any stored
+  value. First run also seeds the token under the config's own `tokenEnv` instead of always
+  `MCP_GATEWAY_TOKEN`.
+
 ## [0.1.0] - 2026-08-18
 
 Initial public release.

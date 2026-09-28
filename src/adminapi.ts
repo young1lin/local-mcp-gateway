@@ -20,7 +20,7 @@ import { dataPath } from "./datadir.js";
 import { readSecureJson } from "./secure/statefile.js";
 import { planMcpImport } from "./mcp-import.js";
 import { mountDbBrowseApi } from "./dbbrowser-api.js";
-import { sendJson, type Handler, type Router } from "./http.js";
+import { sendJson, type Handler, type Res, type Router } from "./http.js";
 
 function configuredPort(): number {
   try {
@@ -303,7 +303,16 @@ export function mountAdminApi(
     sendJson(res, 201, { id: rec.id, label: rec.label, secret: rec.secret, createdAt: rec.createdAt });
   }));
 
+  // The token the process environment supplies lives in that variable, not here: a rotation or a
+  // revoke would last only until the next boot, so both are refused with where to change it.
+  const fromEnvironment = (res: Res, id: string): boolean => {
+    if (!tokens.fromEnvironment(id)) return false;
+    sendJson(res, 409, { error: `token '${id}' comes from the ${tokenEnv} environment variable — change it there` });
+    return true;
+  };
+
   r.delete("/api/tokens/:id", authed(async (req, res) => {
+    if (fromEnvironment(res, req.params.id)) return;
     if (!tokens.remove(req.params.id)) return sendJson(res, 404, { error: "no such token" });
     log("info", "token revoked", { id: req.params.id });
     sendJson(res, 200, { ok: true });
@@ -311,6 +320,7 @@ export function mountAdminApi(
 
   // Rotate one token: a fresh secret under the same id/label; the old secret stops working at once.
   r.post("/api/tokens/:id/rotate", authed(async (req, res) => {
+    if (fromEnvironment(res, req.params.id)) return;
     const rec = tokens.rotate(req.params.id);
     if (!rec) return sendJson(res, 404, { error: "no such token" });
     log("info", "token rotated", { id: rec.id });

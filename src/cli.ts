@@ -332,7 +332,8 @@ export async function run(argv: string[], io: Io, ops: Ops): Promise<number> {
     case "token": {
       const token = ops.token();
       if (!token) {
-        io.err("no token found — start the gateway once and it will generate one");
+        // A token a supervisor injects lives only in the gateway's environment, not in any file here.
+        io.err("no token found — set the config's tokenEnv variable in this shell, or start the gateway once and it will generate one");
         return 1;
       }
       io.out(token);
@@ -346,7 +347,7 @@ export async function run(argv: string[], io: Io, ops: Ops): Promise<number> {
         io.out(row("token", c.token));
         return 0;
       }
-      io.out(row("token", "(none — start the gateway once)"));
+      io.out(row("token", "(none — set the tokenEnv variable, or start the gateway once)"));
       return 1;
     }
     case "open":

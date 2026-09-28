@@ -67,6 +67,7 @@ describe("loadConfig", () => {
     const { loadConfig } = await import("../src/config.js");
     const cfg = loadConfig(writeConfig());
     expect(cfg.token).toBe("tok");
+    expect(cfg.tokenFromEnvironment).toBe(true); // it was in process.env before the store was read
     expect((cfg.servers["mysql"] as any).env.MYSQL_PASS).toBe("${MYSQL_PASS}");
     expect((cfg.servers["mysql"] as any).env.MYSQL_DB).toBe("app");
   });
