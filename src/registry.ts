@@ -28,6 +28,15 @@ export function isLazy(def: ServerDef): boolean {
 const DEFAULT_IDLE_MS = 600_000;
 
 /**
+ * How long a failed start waits before the next attempt, by consecutive failure (the last value
+ * repeats). A start that failed once — a proc whose handshake timed out on a slow machine, a
+ * database that was down at boot — used to leave the MCP in "error" until someone restarted it by
+ * hand. The growing gap keeps a server that is really broken from costing a full start timeout on
+ * every request.
+ */
+export const DEFAULT_RETRY_DELAYS_MS: readonly number[] = [30_000, 60_000, 120_000, 300_000, 600_000];
+
+/**
  * The SDK's server-change notifier — `createMcpHandler`'s `notify`. Each method publishes one change
  * kind onto the handler's internal event bus, and the handler's persistent `listenRouter` fans it out
  * to every active `subscriptions/listen` stream a 2026-07-28 client holds — how the gateway tells a
@@ -73,6 +82,10 @@ export interface RegistryEntry {
    *  refuses to build on a tombstoned entry, so a server built after the delete cannot leak
    * outside the registry with no entry left to close it (see delete). */
   deleted?: boolean;
+  /** Consecutive failed starts since the last successful one (see DEFAULT_RETRY_DELAYS_MS). */
+  failures?: number;
+  /** Epoch ms from which a failed start may be attempted again. Set only while lifecycle is "error". */
+  retryAt?: number;
 }
 
 /** A flat row for the dashboard / API, with a resolved display state. */
@@ -105,7 +118,10 @@ export class Registry {
    *  normally evicts a stale handler never runs for a name that no longer resolves to an entry. */
   private onEvict?: (name: string) => void;
 
-  constructor(private intervalMs = 15000) {}
+  constructor(
+    private intervalMs = 15000,
+    private retryDelaysMs: readonly number[] = DEFAULT_RETRY_DELAYS_MS,
+  ) {}
 
   register(name: string, source: Source, def: ServerDef, adapter: Adapter): RegistryEntry {
     if (this.entries.has(name)) throw new Error(`MCP already registered: ${name}`);
@@ -213,8 +229,26 @@ export class Registry {
    */
   async ensureStarted(name: string): Promise<RegistryEntry> {
     const e = this.require(name);
-    if (e.lifecycle === "idle") await this.start(name);
+    if (e.lifecycle === "idle" || e.lifecycle === "error") await this.enqueue(e, () => this.wake(e));
     return this.require(name);
+  }
+
+  /**
+   * Start an idle entry, or retry a failed one once its delay has passed. Decided inside the
+   * lifecycle queue, so requests that queued up behind a start that then failed get that failure
+   * instead of each paying for another full start attempt of their own.
+   */
+  private async wake(e: RegistryEntry): Promise<void> {
+    if (e.lifecycle === "idle" || this.retryDue(e)) return this.doStart(e);
+    if (e.lifecycle === "error") {
+      const inS = Math.max(1, Math.ceil(((e.retryAt ?? Date.now()) - Date.now()) / 1000));
+      throw new Error(`${e.error ?? "start failed"} (next attempt in ${inS}s)`);
+    }
+  }
+
+  /** A failed start whose wait is over. */
+  private retryDue(e: RegistryEntry, now = Date.now()): boolean {
+    return e.lifecycle === "error" && e.retryAt !== undefined && now >= e.retryAt;
   }
 
   /**
@@ -265,14 +299,30 @@ export class Registry {
       e.toolPage = undefined;
       e.promptPage = undefined;
       this.armIdle(e); // a woken lazy proc starts its idle-reap countdown now
-      log("info", "mcp started", { name, type: e.adapter.type });
+      const retried = e.failures;
+      e.failures = undefined;
+      e.retryAt = undefined;
+      log("info", "mcp started", { name, type: e.adapter.type, ...(retried ? { afterFailures: retried } : {}) });
       invalidateMemoryCache();
     } catch (err) {
       e.lifecycle = "error";
       e.error = msg(err);
-      log("error", "mcp start failed", { name, err: e.error });
+      e.failures = (e.failures ?? 0) + 1;
+      const delays = this.retryDelaysMs;
+      const retryInMs = delays[Math.min(e.failures, delays.length) - 1] ?? 0;
+      e.retryAt = Date.now() + retryInMs;
+      log("error", "mcp start failed", { name, err: e.error, failures: e.failures, retryInMs });
       throw err;
     }
+  }
+
+  /** Clear a failed start back to the entry's resting state, so no retry follows. */
+  private clearFailure(e: RegistryEntry): void {
+    if (e.lifecycle !== "error") return;
+    e.lifecycle = isLazy(e.def) ? "idle" : "stopped";
+    e.error = undefined;
+    e.failures = undefined;
+    e.retryAt = undefined;
   }
 
   /** Close the underlying connection/process and free memory. Idempotent if already stopped. */
@@ -283,7 +333,12 @@ export class Registry {
 
   private async doStop(e: RegistryEntry): Promise<void> {
     const name = e.name;
-    if (!e.server) return; // already stopped (or idle — no child to stop)
+    if (!e.server) {
+      // Already stopped (or idle — no child to stop). A failed start ends here too: a stop is the
+      // way to say "leave it off", so it also ends the retries.
+      this.clearFailure(e);
+      return;
+    }
     this.clearIdle(e); // the reap that is firing, or a plain stop: either way the timer is done
     e.gen++;
     e.lifecycle = "stopping";
@@ -395,7 +450,22 @@ export class Registry {
 
   async checkAll(): Promise<void> {
     this.sweepPageCaches();
+    this.retryFailedStarts();
     await Promise.all(this.all().map((e) => this.checkOne(e)));
+  }
+
+  /**
+   * Retry the failed start of every non-lazy MCP whose delay has passed. Not awaited: a start can
+   * take as long as its adapter's own timeout, and the health tick must not wait for it. A lazy
+   * entry is left to its next request instead, which is what a lazy entry asks for: spawning its
+   * child in the background would spend the memory `lazy` exists to save.
+   */
+  private retryFailedStarts(now = Date.now()): void {
+    for (const e of this.entries.values()) {
+      if (isLazy(e.def) || !this.retryDue(e, now)) continue;
+      log("info", "mcp start retry", { name: e.name, failures: e.failures });
+      void this.enqueue(e, () => this.wake(e)).catch(() => { /* logged by doStart */ });
+    }
   }
 
   /** Drop tool/resource/prompt page caches nobody has paged through lately, so a server that dumps
