@@ -222,8 +222,10 @@ export function buildApp(
     if (!entry) { jsonError(res, 503, `Unknown MCP path: ${name}`); return; }
     // A lazy proc idle at boot (or reaped since): this request is the wakeup. The await IS the
     // contract — the client's request waits for the spawn and then gets served by it, bounded by
-    // the adapter's own start timeout, because AI clients do not retry a 503 helpfully.
-    if (entry.lifecycle === "idle") {
+    // the adapter's own start timeout, because AI clients do not retry a 503 helpfully. An MCP whose
+    // start failed is woken the same way once its retry delay has passed; until then the request
+    // gets the failure and when the next attempt is due (see Registry.wake).
+    if (entry.lifecycle === "idle" || entry.lifecycle === "error") {
       try {
         await registry.ensureStarted(name);
       } catch (err) {

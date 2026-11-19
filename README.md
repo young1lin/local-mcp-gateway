@@ -117,6 +117,11 @@ spawns and speaks MCP to over stdio:
 optional — `exposeResources: false` hides a child's thousands of table-schema resources, say. See
 the adapter table above for the lazy-by-default lifecycle (`lazy`, `idleMs`).
 
+A start that fails — a child whose handshake times out, a database that is down at boot — is
+retried, after 30 s and then at growing gaps up to 10 min. A lazy MCP is retried by its next
+request once the gap has passed (until then the request gets the failure and when the next attempt
+is due); any other MCP is retried in the background. Stopping the MCP ends the retries.
+
 ### Remote MCPs (`http`)
 
 A remote MCP is configured, not launched — where it is, and the headers its key travels in:

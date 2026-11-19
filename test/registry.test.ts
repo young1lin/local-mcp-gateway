@@ -239,3 +239,114 @@ describe("Registry delete vs a queued start", () => {
     expect(builds).toBe(1); // nothing was built that no entry would ever close
   });
 });
+
+/** Adapter whose first `failures` builds throw, then builds an echo server; counts its builds. */
+function flakyAdapter(failures: number): Adapter & { builds: number } {
+  const a = {
+    type: "fake",
+    builds: 0,
+    async build(): Promise<Server> {
+      a.builds++;
+      if (a.builds <= failures) throw new Error("proc handshake timed out");
+      return echoAdapter.build();
+    },
+  };
+  return a;
+}
+
+const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+describe("Registry failed-start retry", () => {
+  it("a lazy MCP whose wake failed is retried by a request once the delay has passed", async () => {
+    const r = new Registry(60000, [500]);
+    const a = flakyAdapter(1);
+    r.register("x", "config", { type: "fake", lazy: true }, a);
+
+    await expect(r.ensureStarted("x")).rejects.toThrow(/handshake timed out/);
+    expect(r.get("x")!.lifecycle).toBe("error");
+
+    // Inside the delay: the failure and when the next attempt is due, without another build.
+    await expect(r.ensureStarted("x")).rejects.toThrow(/next attempt in 1s/);
+    expect(a.builds).toBe(1);
+
+    await wait(550);
+    await r.ensureStarted("x");
+    expect(r.get("x")!.lifecycle).toBe("started");
+    expect(r.get("x")!.failures).toBeUndefined();
+    expect(r.get("x")!.retryAt).toBeUndefined();
+    expect(a.builds).toBe(2);
+    await r.closeAll();
+  });
+
+  it("the delay grows with each consecutive failure and then repeats its last value", async () => {
+    const r = new Registry(60000, [1000, 5000]);
+    r.register("x", "config", { type: "fake" }, flakyAdapter(9));
+    const gapAfter = async () => {
+      await r.start("x").catch(() => {});
+      return r.get("x")!.retryAt! - Date.now();
+    };
+    expect(await gapAfter()).toBeLessThanOrEqual(1000);
+    expect(await gapAfter()).toBeGreaterThan(1000);
+    expect(await gapAfter()).toBeGreaterThan(1000);
+    expect(r.get("x")!.failures).toBe(3);
+  });
+
+  it("requests queued behind a failing wake get its failure instead of starting again each", async () => {
+    const r = new Registry(60000, [60000]);
+    const a = flakyAdapter(1);
+    r.register("x", "config", { type: "fake", lazy: true }, a);
+    const results = await Promise.allSettled([r.ensureStarted("x"), r.ensureStarted("x"), r.ensureStarted("x")]);
+    expect(results.every((s) => s.status === "rejected")).toBe(true);
+    expect(a.builds).toBe(1);
+  });
+
+  it("the health tick retries a non-lazy MCP once its delay has passed", async () => {
+    const r = new Registry(60000, [50]);
+    const a = flakyAdapter(1);
+    r.register("x", "config", { type: "fake" }, a);
+    await r.start("x").catch(() => {});
+
+    await r.checkAll(); // still inside the delay
+    expect(a.builds).toBe(1);
+
+    await wait(70);
+    await r.checkAll();
+    await wait(30); // the tick does not await the retry it started
+    expect(r.get("x")!.lifecycle).toBe("started");
+    expect(a.builds).toBe(2);
+    await r.closeAll();
+  });
+
+  it("the health tick leaves a failed lazy MCP to its next request", async () => {
+    const r = new Registry(60000, [10]);
+    const a = flakyAdapter(1);
+    r.register("x", "config", { type: "fake", lazy: true }, a);
+    await r.ensureStarted("x").catch(() => {});
+    await wait(30);
+    await r.checkAll();
+    await wait(10);
+    expect(a.builds).toBe(1);
+    expect(r.get("x")!.lifecycle).toBe("error");
+  });
+
+  it("a stop ends the retries and returns the entry to its resting state", async () => {
+    const r = new Registry(60000, [10]);
+    const eager = flakyAdapter(1);
+    const lazy = flakyAdapter(1);
+    r.register("eager", "config", { type: "fake" }, eager);
+    r.register("lazy", "config", { type: "fake", lazy: true }, lazy);
+    await r.start("eager").catch(() => {});
+    await r.ensureStarted("lazy").catch(() => {});
+
+    await r.stop("eager");
+    await r.stop("lazy");
+    expect(r.get("eager")!.lifecycle).toBe("stopped");
+    expect(r.get("lazy")!.lifecycle).toBe("idle");
+    expect(r.get("eager")!.error).toBeUndefined();
+
+    await wait(30);
+    await r.checkAll();
+    await wait(10);
+    expect(eager.builds).toBe(1); // nothing restarted the MCP that was stopped
+  });
+});
