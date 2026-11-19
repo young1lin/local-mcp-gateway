@@ -211,7 +211,7 @@ describe("router: waking a lazy proc", () => {
   // A wake that failed once (a handshake timeout on a busy machine) used to leave the MCP in
   // "error" for good: the route only woke "idle", so every later request got "not started".
   it("a POST to an MCP whose wake failed retries it once the delay has passed", async () => {
-    const reg = new Registry(60000, [80]);
+    const reg = new Registry(60000, [1000]);
     registries.push(reg);
     const echo = makeAdapter({ type: "echo" }, "flaky");
     let builds = 0;
@@ -237,7 +237,7 @@ describe("router: waking a lazy proc", () => {
     expect(tooSoon.text).toMatch(/next attempt in/);
     expect(builds).toBe(1);
 
-    await new Promise((r) => setTimeout(r, 100));
+    await new Promise((r) => setTimeout(r, 1100));
     const later = await post();
     expect(later.status).toBe(200);
     expect(reg.get("flaky")!.lifecycle).toBe("started");

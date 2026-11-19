@@ -258,7 +258,7 @@ const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 describe("Registry failed-start retry", () => {
   it("a lazy MCP whose wake failed is retried by a request once the delay has passed", async () => {
-    const r = new Registry(60000, [80]);
+    const r = new Registry(60000, [500]);
     const a = flakyAdapter(1);
     r.register("x", "config", { type: "fake", lazy: true }, a);
 
@@ -269,7 +269,7 @@ describe("Registry failed-start retry", () => {
     await expect(r.ensureStarted("x")).rejects.toThrow(/next attempt in 1s/);
     expect(a.builds).toBe(1);
 
-    await wait(100);
+    await wait(550);
     await r.ensureStarted("x");
     expect(r.get("x")!.lifecycle).toBe("started");
     expect(r.get("x")!.failures).toBeUndefined();
